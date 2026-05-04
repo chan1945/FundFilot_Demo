@@ -4,6 +4,18 @@
 
 ## 실행 방법
 
+### 깃허브 가져오기
+```bash
+# 깃허브 repo 끌어오기
+git clone https://github.com/chan1945/FundPilot.git
+cd FundPilot 
+
+# 파일 수정 후
+git add .
+git commit -m "수정 내용"
+git push origin main
+```
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
