@@ -14,6 +14,9 @@ cd FundPilot
 git add .
 git commit -m "수정 내용"
 git push origin main
+
+# 최신 커밋 끌어오기
+git pull
 ```
 
 ```bash
