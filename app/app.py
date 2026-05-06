@@ -1,6 +1,6 @@
 """
 app.py  ─  FundPilot 정책자금 추천 서비스
-정부기관 스타일 UI + RandomForest 신청 적합도 예측 통합 버전
+정부기관 스타일 UI + RandomForest 승인 가능성 예측 통합 버전
 """
 
 import os
@@ -15,8 +15,8 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-# ── 신청 적합도 예측 모듈 ──
-from approval_model import predict_fit_score
+# ── 승인 가능성 예측 모듈 ──
+from approval_model import predict_approval
 
 load_dotenv()
 
@@ -32,7 +32,7 @@ BASE_RATE = 3.14
 # ══════════════════════════════════════════════
 st.set_page_config(
     page_title="FundPilot | 정책자금 추천",
-    page_icon="🏛️",
+    page_icon=":office:",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -49,18 +49,32 @@ st.markdown("""
 }
 
 /* ── 메인 컨테이너 ── */
+/* Streamlit 기본 UI 요소 전부 숨김 */
+header[data-testid="stHeader"]    { display: none !important; }
+div[data-testid="stToolbar"]      { display: none !important; }
+div[data-testid="stDecoration"]   { display: none !important; }
+div[data-testid="stStatusWidget"] { display: none !important; }
+#MainMenu                         { display: none !important; }
+footer                            { display: none !important; }
+
+/* 최상단 여백 완전 제거 */
+.appview-container .main .block-container:first-child { padding-top: 0 !important; }
+.css-z5fcl4  { padding-top: 0 !important; }
+.css-1d391kg { padding-top: 0 !important; }
+
 .block-container {
     max-width: 1200px;
-    padding: 0 2rem 3rem 2rem;
+    padding: 0 2rem 3rem 2rem !important;
+    margin-top: 0 !important;
 }
 
 /* ── 헤더 배너 ── */
 .gov-header {
     background: linear-gradient(135deg, #003087 0%, #00509E 100%);
     color: white;
-    padding: 28px 36px;
-    border-radius: 0 0 8px 8px;
-    margin: -1rem -2rem 2rem -2rem;
+    padding: 24px 32px;
+    border-radius: 8px;
+    margin: 0 0 2rem 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -267,7 +281,7 @@ st.markdown("""
     color: #111827;
 }
 
-/* ── 신청 적합도 표시 ── */
+/* ── 승인확률 표시 ── */
 .approval-rate-box {
     display: inline-flex;
     flex-direction: column;
@@ -477,215 +491,105 @@ EMPLOYEE_OPTIONS = ["1~4명", "5~9명", "10~49명", "50~99명", "100명 이상"]
 # 정책자금 DB (기존 동일)
 # ══════════════════════════════════════════════
 POLICY_FUNDS = [
-    {
-        "name": "창업기반지원자금",
-        "category": "혁신창업사업화자금",
-        "broad_keywords": ["혁신창업사업화", "창업기반지원"],
-        "target": "업력 7년 미만 창업기업 또는 예비창업자",
-        "required": {"max_years": 7, "allow_pre_founder": True},
-        "preferred_purposes": ["창업자금", "시설자금", "운전자금"],
-        "loan_limit": "연간 60억 원 이내",
-        "facility_limit": "시설자금 연간 60억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 5년 이내",
-        "interest": f"시설 약 {BASE_RATE - 0.6:.2f}% / 운전 약 {BASE_RATE - 0.3:.2f}%",
-        "interest_formula": "시설: 기준금리 - 0.6%p / 운전: 기준금리 - 0.3%p",
-        "extra_note": "신산업 창업 분야 등은 세부 예외조건 확인 필요",
-        "search_keyword": "창업기반지원자금"
-    },
-    {
-        "name": "청년전용창업자금",
-        "category": "혁신창업사업화자금",
-        "broad_keywords": ["혁신창업사업화", "청년전용창업"],
-        "target": "대표자 만 39세 이하, 업력 3년 미만 중소기업 또는 창업 예정자",
-        "required": {"max_years": 3, "max_ceo_age": 39, "allow_pre_founder": True},
-        "preferred_purposes": ["창업자금"],
-        "loan_limit": "기업당 최대 1억 원 이내",
-        "facility_limit": "제조업 및 중점지원분야 영위기업은 2억 원 이내",
-        "working_limit": "기업당 최대 1억 원 이내",
-        "period": "시설 10년 이내 / 운전 6년 이내",
-        "interest": "2.5% 고정금리",
-        "interest_formula": "2.5% 고정금리",
-        "extra_note": "청년창업 평가위원회 심의를 통해 지원 여부 결정",
-        "search_keyword": "청년전용창업자금"
-    },
-    {
-        "name": "개발기술사업화자금",
-        "category": "혁신창업사업화자금",
-        "broad_keywords": ["혁신창업사업화", "개발기술사업화"],
-        "target": "특허, 정부 R&D 성공기술, 인증기술 등 보유 기술을 사업화하려는 중소기업",
-        "required": {"tech_required": True},
-        "preferred_purposes": ["기술개발", "시설자금", "운전자금"],
-        "loan_limit": "연간 30억 원 이내",
-        "facility_limit": "시설자금 포함 연간 30억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 5년 이내",
-        "interest": f"시설 약 {BASE_RATE - 0.3:.2f}% / 운전 약 {BASE_RATE:.2f}%",
-        "interest_formula": "시설: 기준금리 - 0.3%p / 운전: 기준금리",
-        "extra_note": "혁신성장분야 일부 유형은 연간 60억 원, 운전자금 10억 원 이내 가능",
-        "search_keyword": "개발기술사업화자금"
-    },
-    {
-        "name": "신시장진출지원자금 - 내수기업수출기업화",
-        "category": "신시장진출지원자금",
-        "broad_keywords": ["신시장진출", "내수기업수출기업화"],
-        "target": "내수기업 또는 수출 10만 달러 미만 수출초보기업",
-        "required": {"export_stage": ["내수기업", "수출 준비 중", "수출 10만 달러 미만"]},
-        "preferred_purposes": ["수출/글로벌", "운전자금"],
-        "loan_limit": "운전자금 연간 10억 원 이내",
-        "facility_limit": "세부 공고 확인",
-        "working_limit": "운전자금 연간 10억 원 이내",
-        "period": "운전 5년 이내",
-        "interest": f"기준금리 적용 시 약 {BASE_RATE:.2f}%",
-        "interest_formula": "정책자금 기준금리",
-        "extra_note": "수출실적 10만 달러 미만 또는 수출 준비 단계 확인 필요",
-        "search_keyword": "내수기업수출기업화"
-    },
-    {
-        "name": "신시장진출지원자금 - 수출기업글로벌화",
-        "category": "신시장진출지원자금",
-        "broad_keywords": ["신시장진출", "수출기업글로벌화"],
-        "target": "수출 10만 달러 이상 수출유망기업",
-        "required": {"export_stage": ["수출 10만 달러 이상"]},
-        "preferred_purposes": ["수출/글로벌", "시설자금", "운전자금"],
-        "loan_limit": "시설 30억 원 / 운전 10억 원 이내",
-        "facility_limit": "시설자금 연간 30억 원 이내",
-        "working_limit": "운전자금 연간 10억 원 이내",
-        "period": "시설 10년 이내 / 운전 5년 이내",
-        "interest": f"시설 약 {BASE_RATE - 0.3:.2f}% / 운전 약 {BASE_RATE:.2f}%",
-        "interest_formula": "시설: 기준금리 - 0.3%p / 운전: 기준금리",
-        "extra_note": "수출실적 10만 달러 이상 여부 확인 필요",
-        "search_keyword": "수출기업글로벌화"
-    },
-    {
-        "name": "혁신성장지원자금",
-        "category": "신성장기반자금",
-        "broad_keywords": ["신성장기반", "혁신성장지원"],
-        "target": "업력 7년 이상 성장유망 중소기업, 시설투자 기업 등",
-        "required": {"min_years": 7},
-        "preferred_purposes": ["시설자금", "운전자금"],
-        "loan_limit": "연간 60억 원 이내",
-        "facility_limit": "시설자금 연간 60억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 5년 이내",
-        "interest": f"시설 약 {BASE_RATE + 0.2:.2f}% / 운전 약 {BASE_RATE + 0.5:.2f}%",
-        "interest_formula": "시설: 기준금리 + 0.2%p / 운전: 기준금리 + 0.5%p",
-        "extra_note": "성장성, 시설투자, 중점지원분야 여부 확인 필요",
-        "search_keyword": "혁신성장지원자금"
-    },
-    {
-        "name": "제조현장스마트화자금",
-        "category": "신성장기반자금",
-        "broad_keywords": ["신성장기반", "제조현장스마트화"],
-        "target": "스마트공장 도입 또는 제조현장 스마트화 추진기업",
-        "required": {"smart_factory_required": True},
-        "preferred_purposes": ["시설자금", "운전자금"],
-        "loan_limit": "시설자금 연간 100억 원 이내",
-        "facility_limit": "시설자금 연간 100억 원 이내",
-        "working_limit": "운전자금 연간 10억 원 이내",
-        "period": "시설 10년 이내 / 운전 5년 이내",
-        "interest": f"시설 약 {BASE_RATE - 0.3:.2f}% / 운전 약 {BASE_RATE:.2f}%",
-        "interest_formula": "시설: 기준금리 - 0.3%p / 운전: 기준금리",
-        "extra_note": "스마트공장 관련 요건 확인 필요",
-        "search_keyword": "제조현장스마트화자금"
-    },
-    {
-        "name": "Net-Zero 유망기업 지원자금",
-        "category": "신성장기반자금",
-        "broad_keywords": ["신성장기반", "Net-Zero", "넷제로"],
-        "target": "탄소중립 기술사업화 기업 등",
-        "required": {"carbon_required": True},
-        "preferred_purposes": ["시설자금", "운전자금"],
-        "loan_limit": "연간 60억 원 이내",
-        "facility_limit": "시설자금 연간 60억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 5년 이내",
-        "interest": f"시설 약 {BASE_RATE + 0.2:.2f}% / 운전 약 {BASE_RATE + 0.5:.2f}%",
-        "interest_formula": "시설: 기준금리 + 0.2%p / 운전: 기준금리 + 0.5%p",
-        "extra_note": "탄소중립 또는 Net-Zero 관련 요건 확인 필요",
-        "search_keyword": "Net-Zero 유망기업 지원"
-    },
-    {
-        "name": "재도약지원자금 - 사업전환자금",
-        "category": "재도약지원자금",
-        "broad_keywords": ["재도약지원", "사업전환"],
-        "target": "사업전환계획 또는 사업재편계획 승인 후 5년 미만 기업",
-        "required": {"business_conversion_required": True},
-        "preferred_purposes": ["사업전환"],
-        "loan_limit": "연간 100억 원 이내",
-        "facility_limit": "시설자금 연간 100억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 6년 이내",
-        "interest": f"시설 약 {BASE_RATE - 0.3:.2f}% / 운전 약 {BASE_RATE:.2f}%",
-        "interest_formula": "시설: 기준금리 - 0.3%p / 운전: 기준금리",
-        "extra_note": "사업전환계획 또는 사업재편계획 승인 여부 확인 필요",
-        "search_keyword": "사업전환자금"
-    },
-    {
-        "name": "재도약지원자금 - 재창업자금",
-        "category": "재도약지원자금",
-        "broad_keywords": ["재도약지원", "재창업"],
-        "target": "재창업 또는 재창업 준비기업으로 성실경영평가 통과기업",
-        "required": {"restart_required": True},
-        "preferred_purposes": ["재창업"],
-        "loan_limit": "연간 60억 원 이내",
-        "facility_limit": "시설자금 연간 60억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 6년 이내",
-        "interest": f"기준금리 기준 약 {BASE_RATE:.2f}%",
-        "interest_formula": "정책자금 기준금리",
-        "extra_note": "성실경영 심층평가 통과기업은 운전자금 10억 원 이내 가능",
-        "search_keyword": "재창업자금"
-    },
-    {
-        "name": "재도약지원자금 - 통상변화대응",
-        "category": "재도약지원자금",
-        "broad_keywords": ["재도약지원", "통상변화", "무역조정"],
-        "target": "통상환경 변화 피해 또는 대응 필요 기업",
-        "required": {"trade_damage_required": True},
-        "preferred_purposes": ["사업전환", "수출/글로벌"],
-        "loan_limit": "연간 60억 원 이내",
-        "facility_limit": "시설자금 연간 60억 원 이내",
-        "working_limit": "운전자금 연간 5억 원 이내",
-        "period": "시설 10년 이내 / 운전 6년 이내",
-        "interest": "2.0% 고정금리",
-        "interest_formula": "2.0% 고정금리",
-        "extra_note": "통상변화 피해 또는 대응 필요성 증빙 필요",
-        "search_keyword": "통상변화대응자금"
-    },
-    {
-        "name": "긴급경영안정자금 - 일시적경영애로",
-        "category": "긴급경영안정자금",
-        "broad_keywords": ["긴급경영안정", "일시적경영애로"],
-        "target": "매출액 또는 영업이익 감소, 대형사고 등 일시적 경영애로 기업",
-        "required": {"management_distress_required": True},
-        "preferred_purposes": ["긴급경영", "운전자금"],
-        "loan_limit": "운전자금 10억 원 이내, 3년간 15억 원 이내",
-        "facility_limit": "해당 없음",
-        "working_limit": "운전자금 10억 원 이내",
-        "period": "운전 5년 이내",
-        "interest": f"약 {BASE_RATE + 0.5:.2f}%",
-        "interest_formula": "기준금리 + 0.5%p",
-        "extra_note": "매출액 또는 영업이익 10% 이상 감소 등 증빙 필요",
-        "search_keyword": "긴급경영안정자금 일시적경영애로"
-    },
-    {
-        "name": "긴급경영안정자금 - 재해중소기업지원",
-        "category": "긴급경영안정자금",
-        "broad_keywords": ["긴급경영안정", "재해"],
-        "target": "자연재해 또는 사회재난 피해 중소기업",
-        "required": {"disaster_required": True},
-        "preferred_purposes": ["긴급경영", "운전자금"],
-        "loan_limit": "운전자금 10억 원 이내",
-        "facility_limit": "해당 없음",
-        "working_limit": "운전자금 10억 원 이내",
-        "period": "운전 5년 이내",
-        "interest": "1.9% 고정금리",
-        "interest_formula": "1.9% 고정금리",
-        "extra_note": "재해중소기업 확인증 등 피해 증빙 필요",
-        "search_keyword": "재해중소기업지원"
-    }
+    {"name": "창업기반지원자금", "category": "혁신창업사업화자금",
+     "broad_keywords": ["혁신창업사업화", "창업기반지원"],
+     "target": "업력 7년 미만 창업기업 또는 예비창업자",
+     "required": {"max_years": 7, "allow_pre_founder": True},
+     "preferred_purposes": ["창업자금", "시설자금", "운전자금"],
+     "loan_limit": "연간 60억 원 이내", "facility_limit": "시설자금 연간 60억 원 이내",
+     "working_limit": "운전자금 연간 5억 원 이내", "period": "시설 10년 / 운전 5년",
+     "interest": f"시설 {BASE_RATE-0.6:.2f}% / 운전 {BASE_RATE-0.3:.2f}%",
+     "interest_formula": "시설: 기준금리-0.6%p / 운전: 기준금리-0.3%p",
+     "extra_note": "신산업 창업 분야 등 세부 예외조건 확인 필요",
+     "search_keyword": "창업기반지원자금"},
+    {"name": "청년전용창업자금", "category": "혁신창업사업화자금",
+     "broad_keywords": ["혁신창업사업화", "청년전용창업"],
+     "target": "대표자 만 39세 이하, 업력 3년 미만",
+     "required": {"max_years": 3, "max_ceo_age": 39, "allow_pre_founder": True},
+     "preferred_purposes": ["창업자금"],
+     "loan_limit": "최대 1억 원 이내", "facility_limit": "제조업 2억 원 이내",
+     "working_limit": "최대 1억 원 이내", "period": "시설 10년 / 운전 6년",
+     "interest": "2.5% 고정금리", "interest_formula": "2.5% 고정금리",
+     "extra_note": "청년창업 평가위원회 심의 통해 결정",
+     "search_keyword": "청년전용창업자금"},
+    {"name": "개발기술사업화자금", "category": "혁신창업사업화자금",
+     "broad_keywords": ["혁신창업사업화", "개발기술사업화"],
+     "target": "특허·정부 R&D 성공기술·인증기술 보유 중소기업",
+     "required": {"tech_required": True},
+     "preferred_purposes": ["기술개발", "시설자금", "운전자금"],
+     "loan_limit": "연간 30억 원 이내", "facility_limit": "시설 30억 원 이내",
+     "working_limit": "운전 5억 원 이내", "period": "시설 10년 / 운전 5년",
+     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
+     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
+     "extra_note": "혁신성장분야는 시설 60억·운전 10억 이내 가능",
+     "search_keyword": "개발기술사업화자금"},
+    {"name": "신시장진출지원자금 - 내수기업수출기업화", "category": "신시장진출지원자금",
+     "broad_keywords": ["신시장진출", "내수기업수출기업화"],
+     "target": "내수기업 또는 수출 10만 달러 미만 수출초보기업",
+     "required": {"export_stage": ["내수기업", "수출 준비 중", "수출 10만 달러 미만"]},
+     "preferred_purposes": ["수출/글로벌", "운전자금"],
+     "loan_limit": "운전 10억 원 이내", "facility_limit": "세부 공고 확인",
+     "working_limit": "운전 10억 원 이내", "period": "운전 5년",
+     "interest": f"{BASE_RATE:.2f}%", "interest_formula": "기준금리",
+     "extra_note": "수출실적 10만 달러 미만 확인 필요",
+     "search_keyword": "내수기업수출기업화"},
+    {"name": "신시장진출지원자금 - 수출기업글로벌화", "category": "신시장진출지원자금",
+     "broad_keywords": ["신시장진출", "수출기업글로벌화"],
+     "target": "수출 10만 달러 이상 수출유망기업",
+     "required": {"export_stage": ["수출 10만 달러 이상"]},
+     "preferred_purposes": ["수출/글로벌", "시설자금", "운전자금"],
+     "loan_limit": "시설 30억 / 운전 10억 이내", "facility_limit": "시설 30억 이내",
+     "working_limit": "운전 10억 이내", "period": "시설 10년 / 운전 5년",
+     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
+     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
+     "extra_note": "수출 10만 달러 이상 여부 확인 필요",
+     "search_keyword": "수출기업글로벌화"},
+    {"name": "혁신성장지원자금", "category": "신성장기반자금",
+     "broad_keywords": ["신성장기반", "혁신성장지원"],
+     "target": "업력 7년 이상 성장유망 중소기업",
+     "required": {"min_years": 7},
+     "preferred_purposes": ["시설자금", "운전자금"],
+     "loan_limit": "연간 60억 원 이내", "facility_limit": "시설 60억 이내",
+     "working_limit": "운전 5억 이내", "period": "시설 10년 / 운전 5년",
+     "interest": f"시설 {BASE_RATE+0.2:.2f}% / 운전 {BASE_RATE+0.5:.2f}%",
+     "interest_formula": "시설: 기준금리+0.2%p / 운전: 기준금리+0.5%p",
+     "extra_note": "성장성·시설투자·중점지원분야 여부 확인 필요",
+     "search_keyword": "혁신성장지원자금"},
+    {"name": "제조현장스마트화자금", "category": "신성장기반자금",
+     "broad_keywords": ["신성장기반", "제조현장스마트화"],
+     "target": "스마트공장 도입 또는 제조현장 스마트화 추진기업",
+     "required": {"smart_factory_required": True},
+     "preferred_purposes": ["시설자금", "운전자금"],
+     "loan_limit": "시설 100억 원 이내", "facility_limit": "시설 100억 이내",
+     "working_limit": "운전 10억 이내", "period": "시설 10년 / 운전 5년",
+     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
+     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
+     "extra_note": "스마트공장 관련 요건 확인 필요",
+     "search_keyword": "제조현장스마트화자금"},
+    {"name": "긴급경영안정자금 - 일시적경영애로", "category": "긴급경영안정자금",
+     "broad_keywords": ["긴급경영안정", "일시적경영애로"],
+     "target": "매출액·영업이익 감소, 대형사고 등 일시적 경영애로 기업",
+     "required": {"management_distress_required": True},
+     "preferred_purposes": ["긴급경영", "운전자금"],
+     "loan_limit": "운전 10억 원 이내, 3년간 15억 이내",
+     "facility_limit": "해당 없음", "working_limit": "운전 10억 이내",
+     "period": "운전 5년",
+     "interest": f"{BASE_RATE+0.5:.2f}%", "interest_formula": "기준금리+0.5%p",
+     "extra_note": "매출·영업이익 10% 이상 감소 등 증빙 필요",
+     "search_keyword": "긴급경영안정자금 일시적경영애로"},
+    {"name": "재도약지원자금 - 사업전환자금", "category": "재도약지원자금",
+     "broad_keywords": ["재도약지원", "사업전환"],
+     "target": "사업전환계획 또는 사업재편계획 승인 후 5년 미만 기업",
+     "required": {"business_conversion_required": True},
+     "preferred_purposes": ["사업전환"],
+     "loan_limit": "연간 100억 원 이내", "facility_limit": "시설 100억 이내",
+     "working_limit": "운전 5억 이내", "period": "시설 10년 / 운전 6년",
+     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
+     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
+     "extra_note": "사업전환계획 승인 여부 확인 필요",
+     "search_keyword": "사업전환자금"},
 ]
+
 # ══════════════════════════════════════════════
 # 공통 함수
 # ══════════════════════════════════════════════
@@ -719,151 +623,75 @@ def get_historical_score(fund, industry_col, sales_col, experience_col):
     e = safe_get_score(df_experience, keywords, experience_col)
     return round(i * 0.4 + s * 0.3 + e * 0.3, 1)
 
-
-
-def is_sme_allowed(company_type, is_manufacturing, is_focus_field, fund_name):
-    """소상공인 예외 가능성을 포함한 중진공 정책자금 신청대상 1차 점검."""
-    if company_type != "소상공인":
-        return True, ""
-
-    if "청년전용창업자금" in fund_name and is_focus_field:
-        return True, "중점지원분야 소상공인은 청년전용창업자금 신청 가능 예외에 해당할 수 있습니다."
-
-    if "신시장진출지원자금" in fund_name:
-        return True, "신시장진출지원자금은 소상공인 신청 가능 예외가 적용될 수 있습니다."
-
-    if is_manufacturing or is_focus_field:
-        return True, "제조업 또는 중점지원분야 소상공인은 중진공 정책자금 예외 가능성을 반영했습니다."
-
-    return False, "소상공인은 중진공 정책자금 일반 신청대상에서 제한될 수 있습니다. 소상공인 정책자금도 함께 검토해야 합니다."
-
 def check_required(fund, user):
     req = fund["required"]
-    fail = []
-    warn = []
-    matched = []
-
-    ok, reason = is_sme_allowed(
-        user["company_type"],
-        user["is_manufacturing"],
-        user["is_focus_field"],
-        fund["name"]
-    )
-
-    if not ok:
-        fail.append(reason)
-    elif reason:
-        warn.append(reason)
+    fail, warn, matched = [], [], []
 
     if user["has_tax_arrears"]:
-        fail.append("국세 또는 지방세 체납 기업은 융자제한 대상입니다.")
-
+        fail.append("국세·지방세 체납 기업은 융자제한 대상입니다.")
     if user["is_closed_or_no_sales"]:
         fail.append("휴·폐업 중이거나 매출액이 없는 기업은 융자제한 대상입니다.")
-
     if user["has_credit_issue"]:
-        fail.append("연체, 부도, 회생·파산 등 신용정보상 제한 사유가 있으면 융자제한 대상입니다.")
+        fail.append("연체·부도·회생·파산 등 신용정보상 제한 사유가 있습니다.")
 
     if req.get("max_years") is not None:
         if user["business_years"] > req["max_years"]:
-            fail.append(f"업력 조건 불일치: {req['max_years']}년 이내 조건입니다.")
+            fail.append(f"업력 {req['max_years']}년 이내 조건 불일치")
         else:
             matched.append("업력 조건 충족")
 
     if req.get("min_years") is not None:
         if user["business_years"] < req["min_years"]:
-            fail.append(f"업력 조건 불일치: {req['min_years']}년 이상 기업 중심 자금입니다.")
+            fail.append(f"업력 {req['min_years']}년 이상 조건 불일치")
         else:
             matched.append("업력 조건 충족")
 
     if req.get("max_ceo_age") is not None:
         if user["ceo_age"] > req["max_ceo_age"]:
-            fail.append(f"대표자 연령 조건 불일치: 만 {req['max_ceo_age']}세 이하 조건입니다.")
+            fail.append(f"대표자 만 {req['max_ceo_age']}세 이하 조건 불일치")
         else:
             matched.append("대표자 연령 조건 충족")
 
-    if req.get("tech_required"):
-        if not user["has_tech"]:
-            fail.append("특허, 정부 R&D 성공기술, 인증기술 등 기술사업화 요건이 필요합니다.")
-        else:
-            matched.append("기술사업화 요건 충족")
+    if req.get("tech_required") and not user["has_tech"]:
+        fail.append("기술사업화 요건(특허·R&D 등) 필요")
+    elif req.get("tech_required"):
+        matched.append("기술 보유 조건 충족")
 
-    if req.get("smart_factory_required"):
-        if not user["has_smart_factory"]:
-            fail.append("스마트공장 또는 제조현장 스마트화 추진 요건이 필요합니다.")
-        else:
-            matched.append("스마트공장 요건 충족")
+    if req.get("smart_factory_required") and not user["has_smart_factory"]:
+        fail.append("스마트공장 추진 요건 필요")
 
-    if req.get("carbon_required"):
-        if not user["has_carbon"]:
-            fail.append("탄소중립 또는 Net-Zero 관련 요건이 필요합니다.")
-        else:
-            matched.append("탄소중립 요건 충족")
+    if req.get("business_conversion_required") and not user["has_business_conversion"]:
+        fail.append("사업전환계획 승인 요건 필요")
 
-    if req.get("business_conversion_required"):
-        if not user["has_business_conversion"]:
-            fail.append("사업전환계획 또는 사업재편계획 승인 요건이 필요합니다.")
-        else:
-            matched.append("사업전환 요건 충족")
-
-    if req.get("restart_required"):
-        if not user["has_restart"]:
-            fail.append("재창업 또는 성실경영평가 관련 요건이 필요합니다.")
-        else:
-            matched.append("재창업 요건 충족")
-
-    if req.get("trade_damage_required"):
-        if not user["has_trade_damage"]:
-            fail.append("통상변화, 무역조정, 수출피해 증빙이 필요합니다.")
-        else:
-            matched.append("통상변화 대응 요건 충족")
-
-    if req.get("management_distress_required"):
-        if not user["has_management_distress"]:
-            fail.append("매출액 또는 영업이익 감소, 대형사고 등 경영애로 증빙이 필요합니다.")
-        else:
-            matched.append("경영애로 요건 충족")
-
-    if req.get("disaster_required"):
-        if not user["has_disaster"]:
-            fail.append("자연재해 또는 사회재난 피해 증빙이 필요합니다.")
-        else:
-            matched.append("재해 피해 요건 충족")
+    if req.get("management_distress_required") and not user["has_management_distress"]:
+        fail.append("경영애로 증빙 필요")
 
     if "export_stage" in req:
         if user["export_stage"] not in req["export_stage"]:
-            fail.append(f"수출 단계 조건 불일치: 대상은 {', '.join(req['export_stage'])}입니다.")
+            fail.append(f"수출 단계 조건 불일치 (대상: {', '.join(req['export_stage'])})")
         else:
             matched.append("수출 단계 조건 충족")
 
     if user["policy_support_over_200"]:
-        warn.append("최근 5년간 정부·지자체 정책자금 융자 및 보증 지원실적 200억 초과 여부 확인 필요")
-
+        warn.append("최근 5년 정책자금 200억 초과 여부 확인 필요")
     if user["working_capital_over_25"]:
-        warn.append("중진공 정책자금 운전자금 누적 지원금액 25억 초과 시 운전자금 지원 제외 가능성 있음")
+        warn.append("운전자금 누적 25억 초과 시 운전자금 지원 제외 가능")
 
     return fail, warn, matched
-
 
 def purpose_match_score(fund, user):
     score = 0
     if user["fund_purpose"] in fund["preferred_purposes"]:
         score += 20
-
-    if user["tech_status"] != "없음" and any(x in fund["name"] for x in ["개발기술", "기술"]):
+    if user["has_tech"] and "기술" in fund["name"]:
         score += 10
-
-    if user["export_stage"] != "내수기업" and "신시장진출" in fund["name"]:
+    if user["export_stage"] != "내수기업" and "신시장" in fund["name"]:
         score += 10
-
-    if user["is_manufacturing"] and any(x in fund["name"] for x in ["청년전용", "제조현장"]):
+    if user["is_manufacturing"] and "청년전용" in fund["name"]:
         score += 5
-
     if user["is_focus_field"]:
         score += 5
-
     return score
-
 
 def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
     rows = []
@@ -927,7 +755,7 @@ def approval_color(prob):
 # ══════════════════════════════════════════════
 for key, default in [
     ("step", 1), ("result", None), ("labels", None),
-    ("user_info", None), ("fit_score", None)
+    ("user_info", None), ("approval_prob", None)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -938,7 +766,7 @@ for key, default in [
 st.markdown("""
 <div class="gov-header">
   <div>
-    <p class="gov-header-title">🏛️ FundPilot | 정책자금 추천 서비스</p>
+    <p class="gov-header-title">FundPilot | 정책자금 추천 서비스</p>
     <p class="gov-header-sub">중소벤처기업진흥공단 공공데이터 기반 AI 맞춤 정책자금 추천</p>
   </div>
   <div class="gov-badge">중진공 연계 서비스</div>
@@ -1006,14 +834,10 @@ if step == 1:
         is_manufacturing        = st.checkbox("제조업 영위")
         is_focus_field          = st.checkbox("중점지원분야 해당 (혁신성장·초격차·뿌리산업 등)")
         has_smart_factory       = st.checkbox("스마트공장 도입 또는 추진 기업")
-        has_carbon              = st.checkbox("탄소중립 또는 Net-Zero 관련 기업")
         has_business_conversion = st.checkbox("사업전환계획·사업재편계획 승인 이력")
-        has_restart             = st.checkbox("재창업 또는 성실경영평가 관련 요건")
         has_management_distress = st.checkbox("매출·영업이익 감소 등 경영애로 증빙 보유")
     with col5:
         has_trade_damage        = st.checkbox("통상변화·무역조정·수출피해 증빙 보유")
-        has_restructuring       = st.checkbox("구조개선 또는 위기징후기업 요건")
-        has_disaster            = st.checkbox("자연재해 또는 사회재난 피해 증빙")
         has_tax_arrears         = st.checkbox("국세·지방세 체납 있음")
         is_closed_or_no_sales   = st.checkbox("휴·폐업 중이거나 매출 없음")
         has_credit_issue        = st.checkbox("연체·부도·회생·파산 등 신용제한 사유")
@@ -1022,7 +846,7 @@ if step == 1:
 
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
 
-    if st.button("🔍  분석 시작", use_container_width=True, type="primary"):
+    if st.button("  분석 시작", use_container_width=True, type="primary"):
         industry_col  = INDUSTRY_OPTIONS[industry_label]
         sales_col     = SALES_OPTIONS[sales_label]
         experience_col= EXPERIENCE_OPTIONS[experience_label]
@@ -1035,11 +859,10 @@ if step == 1:
             "is_focus_field": is_focus_field,
             "has_tech": tech_status != "없음",
             "has_smart_factory": has_smart_factory,
-            "has_carbon": has_carbon, "has_business_conversion": has_business_conversion,
-            "has_restart": has_restart, "has_trade_damage": has_trade_damage,
+            "has_carbon": False, "has_business_conversion": has_business_conversion,
+            "has_restart": False, "has_trade_damage": has_trade_damage,
             "has_management_distress": has_management_distress,
-            "has_disaster": has_disaster, "has_restructuring": has_restructuring,
-            "has_tax_arrears": has_tax_arrears,
+            "has_disaster": False, "has_tax_arrears": has_tax_arrears,
             "is_closed_or_no_sales": is_closed_or_no_sales,
             "has_credit_issue": has_credit_issue,
             "policy_support_over_200": policy_support_over_200,
@@ -1048,9 +871,9 @@ if step == 1:
 
         result = recommend_fund(industry_col, sales_col, experience_col, user_info)
 
-        # ── RandomForest 신청 적합도 예측 ──
-        with st.spinner("공공데이터 기반 신청 적합도 분석 중..."):
-            fit_score = predict_fit_score(
+        # ── RandomForest 승인 가능성 예측 ──
+        with st.spinner("AI 모델로 승인 가능성 분석 중..."):
+            approval_prob = predict_approval(
                 industry_label=industry_label,
                 sales_label=sales_label,
                 experience_label=experience_label,
@@ -1069,7 +892,7 @@ if step == 1:
             "labels": {"industry": industry_label, "sales": sales_label,
                        "experience": experience_label, "region": region},
             "user_info": user_info,
-            "fit_score": fit_score,
+            "approval_prob": approval_prob,
             "step": 2,
         })
         st.rerun()
@@ -1081,7 +904,7 @@ elif step == 2:
     result   = st.session_state.result
     labels   = st.session_state.labels
     user_info= st.session_state.user_info
-    prob     = st.session_state.fit_score
+    prob     = st.session_state.approval_prob
     top      = result.iloc[0]
 
     # ── 요약 메트릭 ──
@@ -1100,7 +923,7 @@ elif step == 2:
 
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
 
-    # ── 신청 적합도 + 1위 추천 ──
+    # ── 승인 가능성 + 1위 추천 ──
     st.markdown('<p class="section-title">AI 분석 결과</p>', unsafe_allow_html=True)
     left_col, right_col = st.columns([3, 1])
 
@@ -1110,7 +933,7 @@ elif step == 2:
         <div style="display:flex; align-items:center; gap:20px; margin-bottom:20px;">
           <div>
             <div style="font-size:12px; color:#6B7280; font-weight:600; margin-bottom:4px;">
-              공공데이터 기반 신청 적합도
+              AI 승인 가능성 (RandomForest)
             </div>
             <div style="font-size:52px; font-weight:800; color:{color}; line-height:1;">
               {prob}%
@@ -1144,7 +967,7 @@ elif step == 2:
                         unsafe_allow_html=True)
 
     with right_col:
-        # 신청 적합도 게이지
+        # 승인확률 게이지
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
             value=prob,
@@ -1189,7 +1012,7 @@ elif step == 3:
     result    = st.session_state.result
     labels    = st.session_state.labels
     user_info = st.session_state.user_info
-    prob      = st.session_state.fit_score
+    prob      = st.session_state.approval_prob
 
     st.markdown('<p class="section-title">추천 정책자금 TOP3 비교</p>',
                 unsafe_allow_html=True)
@@ -1302,14 +1125,14 @@ elif step == 4:
 
         url = make_search_url(row["검색키워드"])
         st.link_button(
-            f"🔗  {row['검색키워드']} 공고 확인하기 (중소벤처24)",
+            f"  {row['검색키워드']} 공고 확인하기 (중소벤처24)",
             url, use_container_width=True
         )
         st.markdown("")
 
     st.markdown(f"""
     <div class="warn-box">
-      ℹ API가 정상 응답 시 신청기간·접수상태·상세 URL이 자동 표시됩니다.
+      ※ API가 정상 응답 시 신청기간·접수상태·상세 URL이 자동 표시됩니다.
       한도·금리는 점수 추정이 아닌 세부 정책자금 공식 DB 기준입니다.
     </div>
     """, unsafe_allow_html=True)
@@ -1320,8 +1143,8 @@ elif step == 4:
         if st.button("◀  TOP3 비교로", use_container_width=True):
             st.session_state.step = 3; st.rerun()
     with c2:
-        if st.button("🔄  처음부터 다시", use_container_width=True, type="primary"):
-            for key in ["step","result","labels","user_info","fit_score"]:
+        if st.button("처음부터 다시", use_container_width=True, type="primary"):
+            for key in ["step","result","labels","user_info","approval_prob"]:
                 st.session_state[key] = None
             st.session_state.step = 1
             st.rerun()
