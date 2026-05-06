@@ -7,12 +7,14 @@ FundPilot 프로토타입.
 ### 깃허브 가져오기
 ```bash
 # 깃허브 repo 끌어오기
-git clone https://github.com/chan1945/FundPilot.git
-cd FundPilot 
+git clone https://github.com/chan1945/FundFilot_SYM.git
+cd FundPilot_SYM
 ```
 ### 실행
 ```bash
+# python 으로 안되면 python3 로 실행
 python -m venv .venv
+
 source .venv/bin/activate
 pip install -r requirements.txt
 cp app/.env.example app/.env
