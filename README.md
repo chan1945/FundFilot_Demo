@@ -9,16 +9,8 @@
 # 깃허브 repo 끌어오기
 git clone https://github.com/chan1945/FundPilot.git
 cd FundPilot 
-
-# 파일 수정 후
-git add .
-git commit -m "수정 내용"
-git push origin main
-
-# 최신 커밋 끌어오기
-git pull
 ```
-
+### 실행
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -43,3 +35,18 @@ streamlit run app.py
 ## 데이터 파일
 
 앱은 `app/` 디렉터리의 CSV 파일을 기준으로 지원 실적 데이터를 불러옵니다. 실행 시 `cd app` 후 실행해야 현재 포함된 CSV 파일을 정상적으로 찾을 수 있습니다.
+
+## 개발
+```bash
+# 깃허브 repo 끌어오기
+git clone https://github.com/chan1945/FundPilot.git
+cd FundPilot 
+
+# 파일 수정 후
+git add .
+git commit -m "수정 내용"
+git push origin main
+
+# 최신 커밋 끌어오기
+git pull
+```
