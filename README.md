@@ -1,6 +1,6 @@
 # FundPilot_SYM
 
-중소기업 정책자금 추천 Streamlit 애플리케이션입니다.
+FundPilot 프로토타입.
 
 ## 실행 방법
 
