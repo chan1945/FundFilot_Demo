@@ -20,7 +20,7 @@ pip install -r requirements.txt
 cp app/.env.example app/.env
 ```
 
-`app/.env`에 `SMES_API_KEY` 값을 설정한 뒤 실행합니다.
+API 연동 개발 시에는 `app/.env`에 필요한 인증키를 설정합니다.
 
 ```bash
 cd app
@@ -31,12 +31,14 @@ streamlit run app.py
 
 | 이름 | 설명 |
 | --- | --- |
-| `SMES_API_KEY` | 중소벤처기업부 정책자금 API 키 |
-| `SMES_API_URL` | 정책자금 API URL |
+| `SMES24_OPENAPI_TOKEN` | 중소벤처24 공고/증명서 API 인증 토큰 |
+| `DATA_GO_KR_SERVICE_KEY` | 금융위원회, 중소벤처기업진흥공단, ODcloud API용 공공데이터포털 인증키 |
 
 ## 데이터 파일
 
-앱은 `app/` 디렉터리의 CSV 파일을 기준으로 지원 실적 데이터를 불러옵니다. 실행 시 `cd app` 후 실행해야 현재 포함된 CSV 파일을 정상적으로 찾을 수 있습니다.
+앱은 프로젝트 루트의 `data/` 디렉터리에 있는 CSV/PDF 원천자료를 사용합니다. 실행 시 `app/data_store.py`가 CSV 파일을 SQLite DB인 `data/fundpilot.db`에 자동 적재하고, 앱과 승인 가능성 예측 모델은 이 DB를 통해 지원 실적 데이터를 읽습니다.
+
+`data/fundpilot.db`는 원천 CSV에서 재생성 가능한 로컬 캐시이므로 Git 추적 대상에서 제외합니다.
 
 ## 개발
 ```bash

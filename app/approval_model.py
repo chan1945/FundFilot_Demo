@@ -7,12 +7,13 @@ Synthetic 학습 데이터를 생성하고 RandomForest 분류기로
 """
 
 import os
-from glob import glob
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
+
+from data_store import read_dataset
 
 # ──────────────────────────────────────────────
 # 공통 설정
@@ -59,25 +60,10 @@ EXPORT_MAP = {
 
 
 # ──────────────────────────────────────────────
-# CSV 자동 로드 (메인 앱과 동일 로직)
+# DB 자동 로드 (메인 앱과 동일 로직)
 # ──────────────────────────────────────────────
-def _find_csv(keyword):
-    for f in glob("*.csv"):
-        if keyword in f:
-            return f
-    return None
-
-
 def _read_csv(keyword):
-    path = _find_csv(keyword)
-    if not path:
-        return pd.DataFrame()
-    for enc in ["cp949", "utf-8-sig", "utf-8"]:
-        try:
-            return pd.read_csv(path, encoding=enc)
-        except Exception:
-            pass
-    return pd.DataFrame()
+    return read_dataset(keyword)
 
 
 # ──────────────────────────────────────────────
