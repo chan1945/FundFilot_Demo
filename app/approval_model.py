@@ -15,7 +15,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 
-from data_store import DB_PATH, ensure_database, read_dataset
+from data_store import DB_PATH, ensure_database, read_dataset, read_kosmes_support_statistics
 
 # ──────────────────────────────────────────────
 # 공통 설정
@@ -100,6 +100,28 @@ SPECIAL_TAG_COLUMNS = {
 
 SEOUL_METRO_REGIONS = {"서울", "경기", "인천"}
 TRAINING_SAMPLE_SIZE = 10_000
+
+EMPLOYEE_SIZE_API_ALIASES = {
+    "5인 미만": ("5인미만", "5인 미만"),
+    "5~9인": ("10인미만", "10인 미만", "5~9인"),
+    "10~19인": ("20인미만", "20인 미만", "10~19인"),
+    "20~49인": ("50인미만", "50인 미만", "20~49인"),
+    "50~99인": ("100인미만", "100인 미만", "50~99인"),
+    "100~299인": ("300인미만", "300인 미만", "100~299인"),
+    "300인 이상": ("300인이상", "300인 이상"),
+}
+
+ASSET_SIZE_API_ALIASES = {
+    "5억 미만": ("5억미만", "5억 미만"),
+    "5억~10억 미만": ("10억미만", "10억 미만", "5억~10억 미만"),
+    "10억~30억 미만": ("30억미만", "30억 미만", "10억~30억 미만"),
+    "30억~50억 미만": ("50억미만", "50억 미만", "30억~50억 미만"),
+    "50억~70억 미만": ("70억미만", "70억 미만", "50억~70억 미만"),
+    "70억~100억 미만": ("100억미만", "100억 미만", "70억~100억 미만"),
+    "100억~200억 미만": ("200억미만", "200억 미만", "100억~200억 미만"),
+    "200억~300억 미만": ("300억미만", "300억 미만", "200억~300억 미만"),
+    "300억 이상": ("300억이상", "300억 이상"),
+}
 
 
 # ──────────────────────────────────────────────
@@ -218,6 +240,93 @@ def _relative_weight_score(weights: dict[str, float], label: str) -> float:
     return max(0.0, min((weights.get(label, mn) - mn) / (mx - mn), 1.0))
 
 
+def _read_kosmes_stat_table(dataset_key: str, dimension_type: str) -> pd.DataFrame:
+    """Read the common long-form KOSMES statistics table if it has synced rows."""
+    try:
+        return read_kosmes_support_statistics(
+            dataset_key=dataset_key,
+            dimension_type=dimension_type,
+            latest_only=True,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def _alias_match(value: object, aliases: tuple[str, ...]) -> bool:
+    normalized_value = _normalize_text(value)
+    return any(normalized_value == _normalize_text(alias) for alias in aliases)
+
+
+def _long_metric_column(df: pd.DataFrame) -> str | None:
+    return _find_column(df, (
+        "support_amount_million_krw",
+        "loaned_total_amount_million_krw",
+        "supplied_total_amount_million_krw",
+        "support_count",
+    ))
+
+
+def _weights_from_long_buckets(
+    df: pd.DataFrame,
+    labels: list[str],
+    bucket_column: str,
+    aliases_by_label: dict[str, tuple[str, ...]],
+) -> dict[str, float] | None:
+    amount_col = _long_metric_column(df)
+    if df.empty or bucket_column not in df.columns or amount_col is None:
+        return None
+
+    weights = {label: 1.0 for label in labels}
+    for label in labels:
+        aliases = aliases_by_label.get(label, (label,))
+        matched = df[df[bucket_column].apply(lambda value: _alias_match(value, aliases))]
+        if not matched.empty:
+            weights[label] = _numeric_sum(matched, amount_col) + 1.0
+
+    if all(value == 1.0 for value in weights.values()):
+        return None
+    return _normalize_weight_dict(weights)
+
+
+def _long_bucket_score(
+    df: pd.DataFrame,
+    bucket_column: str,
+    aliases: tuple[str, ...],
+    label_candidates: tuple[str, ...] = (),
+    row_keywords: tuple[str, ...] = (),
+) -> float | None:
+    amount_col = _long_metric_column(df)
+    if df.empty or bucket_column not in df.columns or amount_col is None:
+        return None
+
+    target = df
+    label_column = _find_column(df, label_candidates)
+    if label_column and row_keywords:
+        matched = pd.Series(False, index=df.index)
+        for keyword in row_keywords:
+            matched = matched | df[label_column].astype(str).str.contains(keyword, na=False)
+        if matched.any():
+            target = df.loc[matched]
+
+    grouped = []
+    for bucket_value, bucket_rows in target.groupby(bucket_column, dropna=True):
+        if not str(bucket_value or "").strip():
+            continue
+        grouped.append((bucket_value, _numeric_sum(bucket_rows, amount_col)))
+    if not grouped:
+        return None
+
+    matching_values = [value for bucket, value in grouped if _alias_match(bucket, aliases)]
+    if not matching_values:
+        return None
+
+    values = [value for _, value in grouped]
+    mn, mx = min(values), max(values)
+    if mx == mn:
+        return 50.0
+    return max(0.0, min((sum(matching_values) - mn) / (mx - mn) * 100, 100.0))
+
+
 def _get_region_weights():
     """지역별 지원실적의 대여금액 분포를 학습 샘플링 bias로 사용합니다."""
     df = _read_csv("지역별 지원실적")
@@ -244,6 +353,19 @@ def _get_region_weights():
 
 def _get_employee_size_weights():
     """종업원규모별 지원 현황이 저장되어 있으면 학습 샘플링 bias로 사용합니다."""
+    stat_df = _read_kosmes_stat_table(
+        "kosmes_policy_fund_employee_size_support_status",
+        "employee_size",
+    )
+    stat_weights = _weights_from_long_buckets(
+        stat_df,
+        list(EMPLOYEE_SIZE_MAP.keys()),
+        "employee_size_bucket",
+        EMPLOYEE_SIZE_API_ALIASES,
+    )
+    if stat_weights is not None:
+        return stat_weights
+
     df = _read_optional_api_table((
         "kosmes_policy_fund_employee_size_support_status_long",
         "kosmes_policy_fund_employee_size_support_status",
@@ -280,6 +402,19 @@ def _get_employee_size_weights():
 
 def _get_asset_size_weights():
     """자산규모별 지원 현황이 저장되어 있으면 학습 샘플링 bias로 사용합니다."""
+    stat_df = _read_kosmes_stat_table(
+        "kosmes_policy_fund_asset_size_support_status",
+        "asset_size",
+    )
+    stat_weights = _weights_from_long_buckets(
+        stat_df,
+        list(ASSET_SIZE_MAP.keys()),
+        "asset_size_bucket",
+        ASSET_SIZE_API_ALIASES,
+    )
+    if stat_weights is not None:
+        return stat_weights
+
     df = _read_optional_api_table((
         "kosmes_policy_fund_asset_size_support_status_long",
         "kosmes_policy_fund_asset_size_support_status",
@@ -486,27 +621,51 @@ def _stored_api_fit_score_adjustment(
 
     # 이미 SQLite에 저장된 API 패턴만 사용합니다. 예측 중 네트워크 호출을 하지 않아
     # Streamlit 분석 흐름의 응답성과 재현성을 유지하기 위한 후처리입니다.
-    employee_df = _read_optional_api_table((
-        "kosmes_policy_fund_employee_size_support_status_long",
+    employee_label = _employee_size_label(employee_count)
+    employee_df = _read_kosmes_stat_table(
         "kosmes_policy_fund_employee_size_support_status",
-    ))
-    employee_score = _bucket_column_score(
+        "employee_size",
+    )
+    employee_score = _long_bucket_score(
         employee_df,
-        _employee_bucket_columns(employee_count),
+        "employee_size_bucket",
+        EMPLOYEE_SIZE_API_ALIASES[employee_label],
         ("fund_program_name", "구분"),
     )
+    if employee_score is None:
+        employee_df = _read_optional_api_table((
+            "kosmes_policy_fund_employee_size_support_status_long",
+            "kosmes_policy_fund_employee_size_support_status",
+        ))
+        employee_score = _bucket_column_score(
+            employee_df,
+            _employee_bucket_columns(employee_count),
+            ("fund_program_name", "구분"),
+        )
     if employee_score is not None:
         adjustments.append((employee_score - 50.0) * 0.05)
 
-    asset_df = _read_optional_api_table((
-        "kosmes_policy_fund_asset_size_support_status_long",
+    asset_label = _asset_size_label(asset_total)
+    asset_df = _read_kosmes_stat_table(
         "kosmes_policy_fund_asset_size_support_status",
-    ))
-    asset_score = _bucket_column_score(
+        "asset_size",
+    )
+    asset_score = _long_bucket_score(
         asset_df,
-        _asset_bucket_columns(asset_total),
+        "asset_size_bucket",
+        ASSET_SIZE_API_ALIASES[asset_label],
         ("fund_program_name", "구분"),
     )
+    if asset_score is None:
+        asset_df = _read_optional_api_table((
+            "kosmes_policy_fund_asset_size_support_status_long",
+            "kosmes_policy_fund_asset_size_support_status",
+        ))
+        asset_score = _bucket_column_score(
+            asset_df,
+            _asset_bucket_columns(asset_total),
+            ("fund_program_name", "구분"),
+        )
     if asset_score is not None:
         adjustments.append((asset_score - 50.0) * 0.05)
 

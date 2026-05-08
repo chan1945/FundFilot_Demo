@@ -19,6 +19,7 @@ from data_store import (
     has_excluded_industry_rules,
     is_ksic_excluded as is_db_ksic_excluded,
     read_dataset,
+    read_kosmes_support_statistics,
     read_policy_fund_summaries,
 )
 from approval_model import predict_fit_score
@@ -31,6 +32,65 @@ from api_clients import (
 
 BASE_RATE = 3.14
 KOSMES_POLICY_APPLY_URL = "https://digital.kosmes.or.kr/dh/PLFD/APPLY/PSTEP000M0.do"
+
+KOSMES_GENERIC_STAT_TABLES = {
+    "kosmes_policy_fund_employee_size_support_status": "employee_size",
+    "kosmes_policy_fund_asset_size_support_status": "asset_size",
+    "kosmes_policy_fund_loan_by_fund_type_status": "fund_type",
+    "kosmes_regional_support_performance": "regional_support_performance",
+    "kosmes_regional_sme_support_status": "regional_sme",
+    "kosmes_youth_startup_fund_industry_support": "youth_startup_industry",
+    "kosmes_youth_startup_fund_region_support": "youth_startup_region",
+    "kosmes_smart_manufacturing_fund_support": "smart_manufacturing",
+    "kosmes_interest_subsidy_smart_manufacturing_support": "interest_subsidy_smart_manufacturing",
+    "kosmes_interest_subsidy_net_zero_support": "interest_subsidy_net_zero",
+    "kosmes_interest_subsidy_innovation_growth_support": "interest_subsidy_innovation_growth",
+    "kosmes_domestic_to_export_fund_industry_support": "export_industry",
+    "kosmes_export_globalization_fund_business_age_support": "export_globalization_business_age",
+    "kosmes_technology_innovation_restartup_support": "restartup",
+    "kosmes_materials_parts_equipment_support": "materials_parts_equipment",
+}
+
+EMPLOYEE_SIZE_API_ALIASES = {
+    "5인 미만": ("5인미만", "5인 미만"),
+    "5~9인": ("10인미만", "10인 미만", "5~9인"),
+    "10~19인": ("20인미만", "20인 미만", "10~19인"),
+    "20~49인": ("50인미만", "50인 미만", "20~49인"),
+    "50~99인": ("100인미만", "100인 미만", "50~99인"),
+    "100~299인": ("300인미만", "300인 미만", "100~299인"),
+    "300인 이상": ("300인이상", "300인 이상"),
+}
+
+ASSET_SIZE_API_ALIASES = {
+    "5억 미만": ("5억미만", "5억 미만"),
+    "5억~10억 미만": ("10억미만", "10억 미만", "5억~10억 미만"),
+    "10억~30억 미만": ("30억미만", "30억 미만", "10억~30억 미만"),
+    "30억~50억 미만": ("50억미만", "50억 미만", "30억~50억 미만"),
+    "50억~70억 미만": ("70억미만", "70억 미만", "50억~70억 미만"),
+    "70억~100억 미만": ("100억미만", "100억 미만", "70억~100억 미만"),
+    "100억~200억 미만": ("200억미만", "200억 미만", "100억~200억 미만"),
+    "200억~300억 미만": ("300억미만", "300억 미만", "200억~300억 미만"),
+    "300억 이상": ("300억이상", "300억 이상"),
+}
+
+BUCKET_ALIAS_RULES = (
+    ("employee_lt_300", EMPLOYEE_SIZE_API_ALIASES["100~299인"]),
+    ("employee_lt_100", EMPLOYEE_SIZE_API_ALIASES["50~99인"]),
+    ("employee_lt_50", EMPLOYEE_SIZE_API_ALIASES["20~49인"]),
+    ("employee_lt_20", EMPLOYEE_SIZE_API_ALIASES["10~19인"]),
+    ("employee_lt_10", EMPLOYEE_SIZE_API_ALIASES["5~9인"]),
+    ("employee_lt_5", EMPLOYEE_SIZE_API_ALIASES["5인 미만"]),
+    ("employee_gte_300", EMPLOYEE_SIZE_API_ALIASES["300인 이상"]),
+    ("asset_lt_500m", ASSET_SIZE_API_ALIASES["5억 미만"]),
+    ("asset_lt_1b", ASSET_SIZE_API_ALIASES["5억~10억 미만"]),
+    ("asset_lt_3b", ASSET_SIZE_API_ALIASES["10억~30억 미만"]),
+    ("asset_lt_5b", ASSET_SIZE_API_ALIASES["30억~50억 미만"]),
+    ("asset_lt_7b", ASSET_SIZE_API_ALIASES["50억~70억 미만"]),
+    ("asset_lt_10b", ASSET_SIZE_API_ALIASES["70억~100억 미만"]),
+    ("asset_lt_20b", ASSET_SIZE_API_ALIASES["100억~200억 미만"]),
+    ("asset_lt_30b", ASSET_SIZE_API_ALIASES["200억~300억 미만"]),
+    ("asset_gte_30b", ASSET_SIZE_API_ALIASES["300억 이상"]),
+)
 
 # ══════════════════════════════════════════════
 # 페이지 설정
@@ -1029,6 +1089,20 @@ def read_optional_table(table_names):
             count = conn.execute(f'select count(*) from "{table_name}"').fetchone()
             if count and int(count[0]) > 0:
                 return pd.read_sql_query(f'select * from "{table_name}"', conn), table_name
+    for table_name in table_names:
+        dimension_type = KOSMES_GENERIC_STAT_TABLES.get(table_name)
+        if not dimension_type:
+            continue
+        try:
+            df = read_kosmes_support_statistics(
+                dataset_key=table_name,
+                dimension_type=dimension_type,
+                latest_only=True,
+            )
+        except Exception:
+            df = pd.DataFrame()
+        if not df.empty:
+            return df, f"kosmes_support_statistics:{table_name}"
     return pd.DataFrame(), None
 
 def find_column(df, candidates):
@@ -1170,10 +1244,75 @@ def asset_bucket_columns(asset_total):
         return ("asset_lt_30b_amount_million_krw", "300억미만 금액(백만원)")
     return ("asset_gte_30b_amount_million_krw", "300억이상 금액(백만원)")
 
+def bucket_aliases_from_columns(amount_columns):
+    joined = " ".join(str(column) for column in amount_columns)
+    normalized_joined = normalize_text(joined)
+    for token, aliases in BUCKET_ALIAS_RULES:
+        if normalize_text(token) in normalized_joined:
+            return aliases
+        if any(normalize_text(alias) in normalized_joined for alias in aliases):
+            return aliases
+    return ()
+
+def alias_match(value, aliases):
+    normalized_value = normalize_text(value)
+    return any(normalized_value == normalize_text(alias) for alias in aliases)
+
+def long_metric_column(df):
+    return find_column(df, (
+        "support_amount_million_krw",
+        "loaned_total_amount_million_krw",
+        "supplied_total_amount_million_krw",
+        "support_count",
+    ))
+
+def long_bucket_column(df, aliases):
+    for candidate in ("employee_size_bucket", "asset_size_bucket", "dimension_label"):
+        column = find_column(df, (candidate,))
+        if column and df[column].apply(lambda value: alias_match(value, aliases)).any():
+            return column
+    return find_column(df, ("employee_size_bucket", "asset_size_bucket", "dimension_label"))
+
+def score_long_bucket_pattern(df, source, keywords, amount_columns, label_columns):
+    aliases = bucket_aliases_from_columns(amount_columns)
+    bucket_col = long_bucket_column(df, aliases)
+    amount_col = long_metric_column(df)
+    if df.empty or not aliases or not bucket_col or not amount_col:
+        return None
+
+    target = df
+    label_col = find_column(df, label_columns)
+    if label_col and keywords:
+        matched = pd.Series(False, index=df.index)
+        for keyword in keywords:
+            matched = matched | df[label_col].astype(str).str.contains(keyword, na=False)
+        if matched.any():
+            target = df.loc[matched]
+
+    grouped = []
+    for bucket_value, bucket_rows in target.groupby(bucket_col, dropna=True):
+        if not str(bucket_value or "").strip():
+            continue
+        grouped.append((bucket_value, numeric_sum(bucket_rows, amount_col)))
+    if not grouped:
+        return None
+
+    matching_values = [value for bucket, value in grouped if alias_match(bucket, aliases)]
+    if not matching_values:
+        return None
+
+    values = [value for _, value in grouped]
+    mn, mx = min(values), max(values)
+    if mx == mn:
+        score = 50.0
+    else:
+        score = max(0.0, min((sum(matching_values) - mn) / (mx - mn) * 100, 100.0))
+    return {"score": round(score, 1), "source": source, "column": bucket_col}
+
 def score_bucket_pattern(df, source, keywords, amount_columns, label_columns):
     amount_col = find_column(df, amount_columns)
     if df.empty or not amount_col:
-        return None
+        return score_long_bucket_pattern(df, source, keywords, amount_columns, label_columns)
 
     target = df
     label_col = find_column(df, label_columns)

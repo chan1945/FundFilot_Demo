@@ -153,12 +153,14 @@ tag_materials
 
 | 보정 입력 | 참조 데이터 |
 | --- | --- |
-| 종업원 수 | 종업원규모별 지원 현황 |
-| 자산총계 | 자산규모별 지원 현황 |
+| 종업원 수 | `kosmes_support_statistics` 및 `kosmes_policy_fund_employee_size_support_status`에 저장된 정책자금 종업원규모별 지원 현황 API |
+| 자산총계 | `kosmes_support_statistics` 및 `kosmes_policy_fund_asset_size_support_status`에 저장된 정책자금 자산규모별 지원 현황 API |
 | 지역 | 지역/권역별 지원 현황 |
 | 특화 태그 | 청년, 스마트공장, Net-Zero, 혁신성장, 수출, 소부장 관련 저장 API 테이블 |
 
 이 보정은 최대 `-8%p ~ +8%p` 범위로 제한됩니다.
+
+종업원규모별·자산규모별 API는 `fetch_kosmes_support_statistics()` 또는 `fetch_all_kosmes_support_statistics()`로 수집할 때 공통 `kosmes_support_statistics` long-form 테이블과 RandomForest 학습 샘플 생성이 읽는 wide 테이블을 동시에 갱신합니다. 예측 중에는 네트워크를 호출하지 않고 이미 SQLite에 저장된 데이터를 우선 사용하며, 저장 데이터가 없을 때만 fallback 분포를 사용합니다.
 
 ## 7. app.py 후처리 보정
 

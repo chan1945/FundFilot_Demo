@@ -18,8 +18,8 @@
 | 금융위원회_기업기본정보 | 기업명/법인등록번호 기반 설립일, 업종, 종업원 수, 상장 여부 자동 보강 | 기업입력 | `company_profiles` | 기업명/법인등록번호 조회, 후보 선택, 기업명·사업자등록번호·창업일·종업원 수·상장 여부 자동입력, API 업종 추천 후 사용자 확인 적용 |
 | 금융위원회_기업 재무정보 | 매출액, 영업이익, 자산, 부채, 자본 등 재무 입력 검증 및 신청 적합도 모델 feature 확장 | 기업입력, 분석 | `company_financial_summaries`, `company_financial_line_items` | 법인등록번호 기반 최근 3개년 요약재무 조회, 매출·영업이익·자산·자본·부채비율 자동입력, 신청 적합도 보조 feature로 연결 |
 | 금융위원회_개인사업자재무정보 | 개인사업자 유사군 재무정보 보강 및 벤치마크 | 기업입력, 분석 | `sole_prop_finance_stats` | 개인사업자 선택 시 지역/업종 기반 유사군 벤치마크 조회 및 리스크 문구 연결 |
-| 중소벤처기업진흥공단_정책자금 종업원규모별 지원 현황 | 상시근로자 수 기반 수혜 패턴 분석, 신청 적합도 모델 feature 확장 | 분석, TOP3 비교 | `kosmes_policy_fund_employee_size_support_status` | 공통 KOSMES 통계 수집/정규화/조회 helper 구현, 저장 데이터 존재 시 신청 적합도/TOP3 보조점수 반영 |
-| 중소벤처기업진흥공단_정책자금 자산 규모별 지원현황 | 자산총계 입력값을 추천점수 및 신청 적합도 예측에 반영 | 분석, TOP3 비교 | `kosmes_policy_fund_asset_size_support_status` | 공통 KOSMES 통계 수집/정규화/조회 helper 구현, 저장 데이터 존재 시 신청 적합도/TOP3 보조점수 반영 |
+| 중소벤처기업진흥공단_정책자금 종업원규모별 지원 현황 | 상시근로자 수 기반 수혜 패턴 분석, 신청 적합도 모델 feature 확장 | 분석, TOP3 비교 | `kosmes_policy_fund_employee_size_support_status`, `kosmes_support_statistics` | ODcloud fetch/sync 대상. 수집 성공 시 공통 long-form 테이블과 approval_model 호환 wide 테이블을 함께 갱신하고, 저장 데이터 존재 시 신청 적합도/TOP3 보조점수 반영 |
+| 중소벤처기업진흥공단_정책자금 자산 규모별 지원현황 | 자산총계 입력값을 추천점수 및 신청 적합도 예측에 반영 | 분석, TOP3 비교 | `kosmes_policy_fund_asset_size_support_status`, `kosmes_support_statistics` | ODcloud fetch/sync 대상. 수집 성공 시 공통 long-form 테이블과 approval_model 호환 wide 테이블을 함께 갱신하고, 저장 데이터 존재 시 신청 적합도/TOP3 보조점수 반영 |
 | 중소벤처기업진흥공단_정책자금 업종별 지원현황(시설 운전) | 운전자금/시설자금 희망 목적별 추천 정교화 | TOP3 비교 | `kosmes_policy_fund_industry_facility_operation_support_status` | 공통 KOSMES 통계 수집/정규화/조회 helper 구현 |
 | 중소벤처기업진흥공단_정책자금 자금종류별 융자 현황 | 자금별 경쟁도, 승인 패턴, 대출 전환율 계산 | 분석, TOP3 비교 | `kosmes_policy_fund_loan_by_fund_type_status` | CSV DB 적재 및 TOP3 전환율 보조점수/리스크 반영, 공통 KOSMES 통계 API 자동갱신 경로 구현 |
 | 중소벤처기업진흥공단_권역별 중소기업 지원 현황 | 비수도권/권역별 우대 및 지역 리스크 분석 | TOP3 비교, 리스크 | `kosmes_regional_sme_support_status` | 공통 KOSMES 통계 수집/정규화/조회 helper 구현, 저장 데이터 존재 시 지역 실행률 보조점수 반영 |

@@ -498,6 +498,80 @@ def _create_metadata_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        create table if not exists kosmes_policy_fund_employee_size_support_status (
+            id integer primary key autoincrement,
+            snapshot_date text,
+            source_endpoint_path text not null,
+            source_row_number integer,
+            fund_program_name text,
+            employee_lt_5_count numeric,
+            employee_lt_5_amount numeric,
+            employee_lt_10_count numeric,
+            employee_lt_10_amount numeric,
+            employee_lt_20_count numeric,
+            employee_lt_20_amount numeric,
+            employee_lt_50_count numeric,
+            employee_lt_50_amount numeric,
+            employee_lt_100_count numeric,
+            employee_lt_100_amount numeric,
+            employee_lt_300_count numeric,
+            employee_lt_300_amount numeric,
+            employee_gte_300_count numeric,
+            employee_gte_300_amount numeric,
+            raw_json text not null,
+            synced_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_kosmes_employee_size_status_snapshot
+        on kosmes_policy_fund_employee_size_support_status(snapshot_date)
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists kosmes_policy_fund_asset_size_support_status (
+            id integer primary key autoincrement,
+            snapshot_date text,
+            source_endpoint_path text not null,
+            source_row_number integer,
+            fund_program_name text,
+            asset_lt_500m_count numeric,
+            asset_lt_500m_amount_million_krw numeric,
+            asset_lt_1b_count numeric,
+            asset_lt_1b_amount_million_krw numeric,
+            asset_lt_3b_count numeric,
+            asset_lt_3b_amount_million_krw numeric,
+            asset_lt_5b_count numeric,
+            asset_lt_5b_amount_million_krw numeric,
+            asset_lt_7b_count numeric,
+            asset_lt_7b_amount_million_krw numeric,
+            asset_lt_10b_count numeric,
+            asset_lt_10b_amount_million_krw numeric,
+            asset_lt_20b_count numeric,
+            asset_lt_20b_amount_million_krw numeric,
+            asset_gte_20b_count numeric,
+            asset_gte_20b_amount_million_krw numeric,
+            asset_lt_30b_count numeric,
+            asset_lt_30b_amount_million_krw numeric,
+            asset_gte_30b_count numeric,
+            asset_gte_30b_amount_million_krw numeric,
+            financial_statement_missing_count numeric,
+            financial_statement_missing_amount_million_krw numeric,
+            raw_json text not null,
+            synced_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_kosmes_asset_size_status_snapshot
+        on kosmes_policy_fund_asset_size_support_status(snapshot_date)
+        """
+    )
+    conn.execute(
+        """
         create table if not exists external_notices (
             id integer primary key autoincrement,
             notice_key text not null unique,
@@ -1031,6 +1105,140 @@ def save_external_notices(
     return len(normalized_rows)
 
 
+def _save_kosmes_size_support_status_records(
+    records: list[dict[str, object]],
+    dataset_key: str,
+    snapshot_date: str | None,
+    source_path: str,
+    synced_at: str,
+) -> int:
+    table_name = dataset_key
+    if dataset_key == "kosmes_policy_fund_employee_size_support_status":
+        rows = [
+            _employee_size_support_status_row(record, snapshot_date, source_path, synced_at)
+            for record in records
+            if isinstance(record, dict)
+        ]
+        columns = (
+            "snapshot_date", "source_endpoint_path", "source_row_number",
+            "fund_program_name", "employee_lt_5_count", "employee_lt_5_amount",
+            "employee_lt_10_count", "employee_lt_10_amount", "employee_lt_20_count",
+            "employee_lt_20_amount", "employee_lt_50_count", "employee_lt_50_amount",
+            "employee_lt_100_count", "employee_lt_100_amount", "employee_lt_300_count",
+            "employee_lt_300_amount", "employee_gte_300_count", "employee_gte_300_amount",
+            "raw_json", "synced_at",
+        )
+    elif dataset_key == "kosmes_policy_fund_asset_size_support_status":
+        rows = [
+            _asset_size_support_status_row(record, snapshot_date, source_path, synced_at)
+            for record in records
+            if isinstance(record, dict)
+        ]
+        columns = (
+            "snapshot_date", "source_endpoint_path", "source_row_number",
+            "fund_program_name", "asset_lt_500m_count", "asset_lt_500m_amount_million_krw",
+            "asset_lt_1b_count", "asset_lt_1b_amount_million_krw",
+            "asset_lt_3b_count", "asset_lt_3b_amount_million_krw",
+            "asset_lt_5b_count", "asset_lt_5b_amount_million_krw",
+            "asset_lt_7b_count", "asset_lt_7b_amount_million_krw",
+            "asset_lt_10b_count", "asset_lt_10b_amount_million_krw",
+            "asset_lt_20b_count", "asset_lt_20b_amount_million_krw",
+            "asset_gte_20b_count", "asset_gte_20b_amount_million_krw",
+            "asset_lt_30b_count", "asset_lt_30b_amount_million_krw",
+            "asset_gte_30b_count", "asset_gte_30b_amount_million_krw",
+            "financial_statement_missing_count",
+            "financial_statement_missing_amount_million_krw", "raw_json", "synced_at",
+        )
+    else:
+        return 0
+
+    placeholders = ", ".join("?" for _ in columns)
+    quoted_columns = ", ".join(columns)
+    with connect() as conn:
+        conn.execute(
+            f"""
+            delete from {table_name}
+            where snapshot_date is ? and source_endpoint_path = ?
+            """,
+            (snapshot_date, source_path),
+        )
+        if rows:
+            conn.executemany(
+                f"insert into {table_name} ({quoted_columns}) values ({placeholders})",
+                rows,
+            )
+        conn.commit()
+    return len(rows)
+
+
+def _employee_size_support_status_row(
+    record: dict[str, object],
+    snapshot_date: str | None,
+    source_path: str,
+    synced_at: str,
+) -> tuple[object, ...]:
+    return (
+        snapshot_date,
+        source_path,
+        _clean_integer_value(_record_value(record, ("일련번호", "순번", "번호"))),
+        _clean_optional_value(_record_value(record, ("구분", "사업명", "정책자금명", "자금명"))),
+        _clean_metric_value(record, ("5인미만 건수",)),
+        _clean_metric_value(record, ("5인미만 금액", "5인미만 금액(백만원)")),
+        _clean_metric_value(record, ("10인미만 건수",)),
+        _clean_metric_value(record, ("10인미만 금액", "10인미만 금액(백만원)")),
+        _clean_metric_value(record, ("20인미만 건수",)),
+        _clean_metric_value(record, ("20인미만 금액", "20인미만 금액(백만원)")),
+        _clean_metric_value(record, ("50인미만 건수",)),
+        _clean_metric_value(record, ("50인미만 금액", "50인미만 금액(백만원)")),
+        _clean_metric_value(record, ("100인미만 건수",)),
+        _clean_metric_value(record, ("100인미만 금액", "100인미만 금액(백만원)")),
+        _clean_metric_value(record, ("300인미만 건수",)),
+        _clean_metric_value(record, ("300인미만 금액", "300인미만 금액(백만원)")),
+        _clean_metric_value(record, ("300인이상 건수",)),
+        _clean_metric_value(record, ("300인이상 금액", "300인이상 금액(백만원)")),
+        json.dumps(record, ensure_ascii=False, sort_keys=True),
+        synced_at,
+    )
+
+
+def _asset_size_support_status_row(
+    record: dict[str, object],
+    snapshot_date: str | None,
+    source_path: str,
+    synced_at: str,
+) -> tuple[object, ...]:
+    return (
+        snapshot_date,
+        source_path,
+        _clean_integer_value(_record_value(record, ("일련번호", "순번", "번호"))),
+        _clean_optional_value(_record_value(record, ("구분", "사업명", "정책자금명", "자금명"))),
+        _clean_metric_value(record, ("5억미만 건수",)),
+        _clean_metric_value(record, ("5억미만 금액(백만원)", "5억미만 금액")),
+        _clean_metric_value(record, ("10억미만 건수",)),
+        _clean_metric_value(record, ("10억미만 금액(백만원)", "10억미만 금액")),
+        _clean_metric_value(record, ("30억미만 건수",)),
+        _clean_metric_value(record, ("30억미만 금액(백만원)", "30억미만 금액")),
+        _clean_metric_value(record, ("50억미만 건수",)),
+        _clean_metric_value(record, ("50억미만 금액(백만원)", "50억미만 금액")),
+        _clean_metric_value(record, ("70억미만 건수",)),
+        _clean_metric_value(record, ("70억미만 금액(백만원)", "70억미만 금액")),
+        _clean_metric_value(record, ("100억미만 건수",)),
+        _clean_metric_value(record, ("100억미만 금액(백만원)", "100억미만 금액")),
+        _clean_metric_value(record, ("200억미만 건수",)),
+        _clean_metric_value(record, ("200억미만 금액(백만원)", "200억미만 금액")),
+        _clean_metric_value(record, ("200억이상 건수",)),
+        _clean_metric_value(record, ("200억이상 금액(백만원)", "200억이상 금액")),
+        _clean_metric_value(record, ("300억미만 건수",)),
+        _clean_metric_value(record, ("300억미만 금액(백만원)", "300억미만 금액")),
+        _clean_metric_value(record, ("300억이상 건수",)),
+        _clean_metric_value(record, ("300억이상 금액(백만원)", "300억이상 금액")),
+        _clean_metric_value(record, ("재무제표미등록 건수",)),
+        _clean_metric_value(record, ("재무제표미등록 금액", "재무제표미등록 금액(백만원)")),
+        json.dumps(record, ensure_ascii=False, sort_keys=True),
+        synced_at,
+    )
+
+
 def save_kosmes_support_statistics(
     records: list[dict[str, object]],
     dataset_key: str,
@@ -1142,6 +1350,17 @@ def save_kosmes_support_statistics(
                 normalized_rows,
             )
         conn.commit()
+    if dataset_key in {
+        "kosmes_policy_fund_employee_size_support_status",
+        "kosmes_policy_fund_asset_size_support_status",
+    }:
+        _save_kosmes_size_support_status_records(
+            records=records,
+            dataset_key=dataset_key,
+            snapshot_date=snapshot_date,
+            source_path=source_path,
+            synced_at=synced_at,
+        )
     return len(normalized_rows)
 
 
