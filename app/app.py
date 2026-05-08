@@ -1,6 +1,6 @@
 """
 app.py  ─  FundPilot 정책자금 추천 서비스
-정부기관 스타일 UI + RandomForest 승인 가능성 예측 통합 버전
+정부기관 스타일 UI + RandomForest 신청 적합도 통합 버전
 """
 
 from datetime import date, datetime
@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# ── 승인 가능성 예측 모듈 ──
+# ── 신청 적합도 보조 모델 ──
 from data_store import (
     connect,
     ensure_database,
@@ -21,7 +21,7 @@ from data_store import (
     read_dataset,
     read_policy_fund_summaries,
 )
-from approval_model import predict_approval
+from approval_model import predict_fit_score
 from api_clients import (
     FETCH_SUCCESS,
     get_corp_outline_v2,
@@ -977,7 +977,9 @@ def has_limit_exception(user):
         or bool(set(user["certifications"]) & PREFERRED_CERTS_FOR_LIMIT_EXCEPTION)
     )
 
-def adjust_approval_probability(prob, user):
+def adjust_application_fit_score(score, user):
+    # RandomForest 보조값에 화면 입력 기반의 명시적 제한/우대 조건을 한 번 더 반영합니다.
+    # 실제 승인확률 보정이 아니라 신청 전 자가점검용 적합도 후처리입니다.
     caps = []
     if user["hard_block_count"] > 0:
         caps.append(20.0)
@@ -997,8 +999,8 @@ def adjust_approval_probability(prob, user):
             uplift += 5
         if user["has_tech"]:
             uplift += 3
-        return min(round(prob + uplift, 1), 97.0)
-    return min(prob, min(caps))
+        return min(round(score + uplift, 1), 97.0)
+    return min(score, min(caps))
 
 def safe_get_score(df, keywords, column):
     if df.empty or "구분" not in df.columns or column not in df.columns:
@@ -1323,6 +1325,8 @@ def api_pattern_context(fund, user):
     risks = []
     evidence = []
 
+    # 저장된 KOSMES 패턴 테이블이 있을 때만 추천점수에 소폭 반영합니다.
+    # 데이터가 없으면 기존 CSV 기반 과거점수와 룰 엔진만으로 추천 흐름을 유지합니다.
     employee_df, employee_source = read_optional_table((
         "kosmes_policy_fund_employee_size_support_status_long",
         "kosmes_policy_fund_employee_size_support_status",
@@ -1560,6 +1564,8 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
         if not fund_reference:
             warn.append("자금종류별 융자 현황에서 동일 자금명을 확인하지 못했습니다.")
 
+        # 추천상태는 제한 사유와 목적 적합성으로 나누고, TOP3 순위는 아래 최종 추천점수로 정합니다.
+        # 이 점수는 자금 간 비교용이며 실제 심사 통과 확률이 아닙니다.
         if len(fail) == 0:
             status = "우선 추천"
             final_score = min(hist * 0.7 + fit + matched_count * 3, 100)
@@ -1611,13 +1617,16 @@ def make_status_badge(status):
     else:
         return '<span class="badge-red">✖ 조건 불충족</span>'
 
-def approval_color(prob):
-    if prob >= 70:
+def score_color(score):
+    if score >= 70:
         return "#1D4ED8"
-    elif prob >= 45:
+    elif score >= 45:
         return "#D97706"
     else:
         return "#DC2626"
+
+def recommendation_score_color(score):
+    return score_color(score)
 
 def display_text(value, fallback=""):
     text = str(value if value not in (None, "") else fallback)
@@ -1628,7 +1637,7 @@ def display_text(value, fallback=""):
 # ══════════════════════════════════════════════
 for key, default in [
     ("step", 1), ("result", None), ("labels", None),
-    ("user_info", None), ("approval_prob", None),
+    ("user_info", None), ("application_fit_score", None),
     ("corp_lookup_candidates", []), ("corp_lookup_message", ""),
     ("corp_lookup_applied_info", ""), ("corp_lookup_finance_message", ""),
     ("corp_lookup_industry_suggestion", None),
@@ -2155,9 +2164,11 @@ if step == 1:
 
         result = recommend_fund(industry_col, sales_col, experience_col, user_info)
 
-        # ── RandomForest 승인 가능성 예측 ──
-        with st.spinner("AI 모델로 승인 가능성 분석 중..."):
-            approval_prob = predict_approval(
+        # ── RandomForest 신청 적합도 계산 ──
+        # 추천점수와 별개로 계산되는 내부 보조값입니다. 세션에는 저장하지만
+        # STEP 2 대표 숫자는 TOP3 비교와 동일한 추천점수를 사용합니다.
+        with st.spinner("AI 모델로 정책자금 적합도 분석 중..."):
+            application_fit_score = predict_fit_score(
                 industry_label=industry_label,
                 sales_label=sales_label,
                 experience_label=experience_label,
@@ -2172,9 +2183,9 @@ if step == 1:
                 employee_count=employee_count,
                 asset_total=asset_total,
                 region_label=region,
-                special_tags=special_tags,
+                special_tags=tuple(special_tags),
             )
-            approval_prob = adjust_approval_probability(approval_prob, user_info)
+            application_fit_score = adjust_application_fit_score(application_fit_score, user_info)
 
         st.session_state.update({
             "result": result,
@@ -2185,7 +2196,7 @@ if step == 1:
                        "ksic": ksic_code, "employees": employee_count,
                        "sales_growth": growth_text},
             "user_info": user_info,
-            "approval_prob": approval_prob,
+            "application_fit_score": application_fit_score,
             "step": 2,
         })
         st.rerun()
@@ -2197,8 +2208,8 @@ elif step == 2:
     result   = st.session_state.result
     labels   = st.session_state.labels
     user_info= st.session_state.user_info
-    prob     = st.session_state.approval_prob
     top      = result.iloc[0]
+    top_score = float(top["추천점수"])
 
     # ── 요약 메트릭 ──
     st.markdown('<p class="section-title">분석 조건 요약</p>', unsafe_allow_html=True)
@@ -2245,20 +2256,20 @@ elif step == 2:
 
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
 
-    # ── 승인 가능성 + 1위 추천 ──
-    st.markdown('<p class="section-title">AI 분석 결과</p>', unsafe_allow_html=True)
+    # ── 추천점수 + 1위 추천 ──
+    st.markdown('<p class="section-title">추천 분석 결과</p>', unsafe_allow_html=True)
     left_col, right_col = st.columns([3, 1])
 
     with left_col:
-        color = approval_color(prob)
+        color = recommendation_score_color(top_score)
         st.markdown(f"""
         <div style="display:flex; align-items:center; gap:20px; margin-bottom:20px;">
           <div>
             <div style="font-size:12px; color:#6B7280; font-weight:600; margin-bottom:4px;">
-              AI 승인 가능성 (RandomForest)
+              최우선 추천 자금 추천점수
             </div>
             <div style="font-size:52px; font-weight:800; color:{color}; line-height:1;">
-              {prob}%
+              {top_score:.1f}점
             </div>
           </div>
           <div style="flex:1; padding-left:24px; border-left:2px solid #E2E8F0;">
@@ -2293,14 +2304,14 @@ elif step == 2:
                         unsafe_allow_html=True)
 
     with right_col:
-        # 승인확률 게이지
+        # 추천점수 게이지: 신청 적합도 보조값이 아니라 TOP3 정렬에 사용한 추천점수입니다.
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
-            value=prob,
-            number={"suffix": "%", "font": {"size": 28, "color": approval_color(prob)}},
+            value=top_score,
+            number={"suffix": "점", "font": {"size": 28, "color": recommendation_score_color(top_score)}},
             gauge={
                 "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#D9DEE8"},
-                "bar": {"color": approval_color(prob), "thickness": 0.25},
+                "bar": {"color": recommendation_score_color(top_score), "thickness": 0.25},
                 "bgcolor": "white",
                 "steps": [
                     {"range": [0, 45],  "color": "#FEE2E2"},
@@ -2308,9 +2319,9 @@ elif step == 2:
                     {"range": [70, 100],"color": "#D1FAE5"},
                 ],
                 "threshold": {
-                    "line": {"color": approval_color(prob), "width": 3},
+                    "line": {"color": recommendation_score_color(top_score), "width": 3},
                     "thickness": 0.8,
-                    "value": prob
+                    "value": top_score
                 },
             }
         ))
@@ -2320,7 +2331,7 @@ elif step == 2:
             paper_bgcolor="white",
         )
         st.plotly_chart(fig, use_container_width=False)
-        st.caption("※ 공공데이터 학습 기반 AI 예측값으로 참고용입니다.")
+        st.caption("※ TOP3 추천 결과의 추천점수이며, 실제 심사 확률을 의미하지 않습니다.")
 
     benchmark = user_info.get("sole_prop_benchmark")
     if benchmark:
@@ -2348,7 +2359,6 @@ elif step == 3:
     result    = st.session_state.result
     labels    = st.session_state.labels
     user_info = st.session_state.user_info
-    prob      = st.session_state.approval_prob
 
     st.markdown('<p class="section-title">추천 정책자금 TOP3 비교</p>',
                 unsafe_allow_html=True)
@@ -2390,7 +2400,7 @@ elif step == 3:
               <div class="fund-info-value">{display_text(row["추천점수"])}점</div>
             </div>
             <div class="fund-info-item">
-              <div class="fund-info-label">요약 금리</div>
+              <div class="fund-info-label">금리</div>
               <div class="fund-info-value">{display_text(row["공식금리"])}</div>
             </div>
             <div class="fund-info-item">
@@ -2460,7 +2470,7 @@ elif step == 4:
               <div class="fund-info-value">{display_text(row["공식한도"])}</div>
             </div>
             <div class="fund-info-item">
-              <div class="fund-info-label">요약 금리</div>
+              <div class="fund-info-label">금리</div>
               <div class="fund-info-value">{display_text(row["공식금리"])}</div>
             </div>
             <div class="fund-info-item">
@@ -2493,7 +2503,7 @@ elif step == 4:
     with c2:
         if st.button("처음부터 다시", use_container_width=True, type="primary"):
             for key in [
-                "step", "result", "labels", "user_info", "approval_prob",
+                "step", "result", "labels", "user_info", "application_fit_score",
                 "corp_lookup_candidates", "corp_lookup_message",
                 "corp_lookup_applied_info", "corp_lookup_finance_message",
                 "corp_lookup_industry_suggestion", "sole_prop_benchmark_rows",

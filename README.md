@@ -36,7 +36,7 @@ streamlit run app.py
 
 ## 데이터 파일
 
-앱은 프로젝트 루트의 `data/` 디렉터리에 있는 CSV/PDF 원천자료를 사용합니다. 실행 시 `app/data_store.py`가 CSV 파일을 SQLite DB인 `data/fundpilot.db`에 자동 적재하고, 앱과 승인 가능성 예측 모델은 이 DB를 통해 지원 실적 데이터를 읽습니다.
+앱은 프로젝트 루트의 `data/` 디렉터리에 있는 CSV/PDF 원천자료를 사용합니다. 실행 시 `app/data_store.py`가 CSV 파일을 SQLite DB인 `data/fundpilot.db`에 자동 적재하고, 앱과 신청 적합도 보조 모델은 이 DB를 통해 지원 실적 데이터를 읽습니다.
 
 `data/fundpilot.db`는 원천 CSV에서 재생성 가능한 로컬 캐시이므로 Git 추적 대상에서 제외합니다.
 
