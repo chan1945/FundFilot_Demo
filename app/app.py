@@ -505,11 +505,6 @@ CERTIFICATION_OPTIONS = [
     "스마트공장 도입 확인", "여성기업 확인", "사회적기업 또는 예비사회적기업",
 ]
 SMART_FACTORY_OPTIONS = ["미도입", "기초 (1단계)", "중간1 (2단계)", "중간2 (3단계)", "고도화 (4단계 이상)"]
-EMPLOYMENT_ACTIVITY_OPTIONS = [
-    "내일채움공제 가입", "청년재직자 내일채움공제 가입", "가족친화인증 획득",
-    "일·생활 균형 우수기업 인증", "성과공유제 과제 확인서 발급",
-    "납품단가 조정 참여", "협력이익공유제 참여",
-]
 RESTART_CONVERSION_OPTIONS = ["해당 없음", "사업전환 진행 중 또는 예정", "재창업 (폐업 후 재창업)", "구조개선 대상 기업"]
 FUND_USE_OPTIONS = ["운전자금", "시설자금", "R&D 투자자금"]
 SEOUL_METRO_REGIONS = {"서울", "경기", "인천"}
@@ -1550,6 +1545,32 @@ def purpose_match_score(fund, user):
         score += 2
     return score
 
+def signed_score(value):
+    return f"{value:+.1f}점"
+
+def build_recommendation_reason(
+    historical_score,
+    purpose_score,
+    matched_count,
+    base_score,
+    api_adjustment,
+    final_score,
+):
+    summary = (
+        f"- 과거 지원 패턴 {historical_score:.1f}점\n"
+        f"- 목적/정책 적합 {purpose_score:.1f}점\n"
+        f"- 총합 = {final_score:.1f}점"
+    )
+    detail = (
+        f"- 과거 지원 패턴 {historical_score:.1f}점\n"
+        f"- 목적/정책 적합 {purpose_score:.1f}점\n"
+        f"- 자격·우대 충족 {matched_count}건\n"
+        f"- 기본 추천점수 {base_score:.1f}점\n"
+        f"- API 보정 {signed_score(api_adjustment)}\n"
+        f"- 총합 = {final_score:.1f}점"
+    )
+    return summary, detail
+
 def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
     rows = []
     for fund in POLICY_FUNDS:
@@ -1558,9 +1579,11 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
         fit  = purpose_match_score(fund, user_info)
         api_context = api_pattern_context(fund, user_info)
         fund_reference = policy_fund_reference(fund)
+        api_evidence = list(api_context["evidence"])
+        api_risks = list(api_context["risks"])
         matched_count = len(matched)
-        warn.extend(api_context["risks"])
-        matched.extend(api_context["evidence"])
+        warn.extend(api_risks)
+        matched.extend(api_evidence)
         if not fund_reference:
             warn.append("자금종류별 융자 현황에서 동일 자금명을 확인하지 못했습니다.")
 
@@ -1568,18 +1591,32 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
         # 이 점수는 자금 간 비교용이며 실제 심사 통과 확률이 아닙니다.
         if len(fail) == 0:
             status = "우선 추천"
-            final_score = min(hist * 0.7 + fit + matched_count * 3, 100)
+            base_score = min(hist * 0.7 + fit + matched_count * 3, 100)
         elif len(fail) <= 2 and fit > 0:
             status = "조건부 검토"
-            final_score = min(hist * 0.45 + fit, 70)
+            base_score = min(hist * 0.45 + fit, 70)
         else:
             status = "조건 불충족"
-            final_score = min(hist * 0.25, 40)
+            base_score = min(hist * 0.25, 40)
+        final_score = base_score
         final_score = max(0.0, min(final_score + api_context["adjustment"], 100.0))
+        rounded_final_score = round(final_score, 1)
+        reason_summary, reason_detail = build_recommendation_reason(
+            hist,
+            fit,
+            matched_count,
+            base_score,
+            api_context["adjustment"],
+            rounded_final_score,
+        )
 
         rows.append({
             "정책자금": fund["name"], "분류": fund["category"],
-            "추천점수": round(final_score, 1),
+            "추천점수": rounded_final_score,
+            "과거지원패턴점수": hist,
+            "목적정책적합점수": fit,
+            "자격우대충족건수": matched_count,
+            "기본추천점수": round(base_score, 1),
             "추천상태": status,
             "제외사유": " / ".join(fail),
             "주의사항": " / ".join(warn),
@@ -1600,6 +1637,8 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
             "API보정": api_context["adjustment"],
             "API근거": " / ".join(api_context["evidence"]),
             "패턴리스크": " / ".join(api_context["risks"]),
+            "추천점수근거": reason_summary,
+            "추천점수상세근거": reason_detail,
         })
 
     result = pd.DataFrame(rows)
@@ -1631,6 +1670,15 @@ def recommendation_score_color(score):
 def display_text(value, fallback=""):
     text = str(value if value not in (None, "") else fallback)
     return html_escape(text)
+
+def series_get(row, key, fallback=""):
+    if hasattr(row, "get"):
+        value = row.get(key, fallback)
+    else:
+        value = fallback
+    if pd.isna(value):
+        return fallback
+    return value
 
 # ══════════════════════════════════════════════
 # 세션 상태
@@ -1970,7 +2018,6 @@ if step == 1:
     with p2:
         ip_count = st.number_input("최근 3년 내 지식재산권 보유 건수", min_value=0, max_value=1000, value=0, step=1)
         smart_factory_stage = st.selectbox("스마트공장 도입 단계", SMART_FACTORY_OPTIONS)
-        employment_activities = st.multiselect("고용유지 활동 현황", EMPLOYMENT_ACTIVITY_OPTIONS)
         restart_conversion_status = st.radio("사업전환·재창업 해당 여부", RESTART_CONVERSION_OPTIONS)
 
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
@@ -2109,7 +2156,6 @@ if step == 1:
             "export_amount_usd": export_amount_usd,
             "certifications": certifications, "ip_count": ip_count,
             "smart_factory_stage": smart_factory_stage,
-            "employment_activities": employment_activities,
             "restart_conversion_status": restart_conversion_status,
             "tech_status": tech_status, "export_stage": export_stage,
             "business_years": business_years,
@@ -2418,6 +2464,26 @@ elif step == 3:
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+        with st.expander(f"▸ {row['정책자금']} 추천점수 산정 근거"):
+            historical_score = float(series_get(row, "과거지원패턴점수", 0.0))
+            purpose_score = float(series_get(row, "목적정책적합점수", 0.0))
+            matched_count = int(series_get(row, "자격우대충족건수", 0))
+            base_score = float(series_get(row, "기본추천점수", 0.0))
+            reason_detail = series_get(row, "추천점수상세근거", "추천점수 산정 근거를 다시 계산하려면 분석을 새로 실행하십시오.")
+            st.markdown("##### 추천점수 산정 근거")
+            st.markdown(reason_detail)
+            st.markdown(f"""
+            <table class="info-table">
+              <tr><th>과거 지원 패턴</th><td>{display_text(f'{historical_score:.1f}점')}</td></tr>
+              <tr><th>목적/정책 적합</th><td>{display_text(f'{purpose_score:.1f}점')}</td></tr>
+              <tr><th>자격·우대 충족</th><td>{display_text(f'{matched_count}건')}</td></tr>
+              <tr><th>기본 추천점수</th><td>{display_text(f'{base_score:.1f}점')}</td></tr>
+              <tr><th>API 보정</th><td>{display_text(f'{row["API보정"]:+.1f}점 · {row["API근거"] or "저장된 보조 API 패턴 없음"}')}</td></tr>
+              <tr><th>총합</th><td>{display_text(f'{float(row["추천점수"]):.1f}점')}</td></tr>
+              <tr><th>충족 조건</th><td>{display_text(series_get(row, "충족조건"), "없음")}</td></tr>
+            </table>
+            """, unsafe_allow_html=True)
 
         with st.expander(f"▸ {row['정책자금']} 상세 조건 보기"):
             st.markdown(f"""
