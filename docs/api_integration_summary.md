@@ -1,6 +1,6 @@
-# FundPilot_SYM API 정보 정리
+# FundFilot_Demo API 정보 정리
 
-이 문서는 FundPilot_SYM 개발 에이전트가 외부 API 연동을 구현할 때 참고하기 위한 통합 문서입니다.
+이 문서는 FundFilot_Demo 개발 에이전트가 외부 API 연동을 구현할 때 참고하기 위한 통합 문서입니다.
 
 참조 원본:
 

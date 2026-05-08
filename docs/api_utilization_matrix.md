@@ -1,6 +1,6 @@
-# FundPilot_SYM API 활용 매트릭스
+# FundFilot_Demo API 활용 매트릭스
 
-이 문서는 `docs/api.md`에 등록된 모든 API를 FundPilot_SYM에 어떻게 활용할지 추적하기 위한 필수 적용 매트릭스입니다.
+이 문서는 `docs/api.md`에 등록된 모든 API를 FundFilot_Demo에 어떻게 활용할지 추적하기 위한 필수 적용 매트릭스입니다.
 
 원칙:
 
@@ -50,4 +50,4 @@
 3. 수집 로그와 원문 캐시는 인증키를 제외한 형태로 저장되어야 합니다.
 4. 추천/분석에 쓰기 쉬운 정규화 테이블 또는 조회 함수가 있어야 합니다.
 5. `docs/public_data_api_candidates.md`의 활용 목적에 대응하는 앱 기능, 추천점수, 신청 적합도 feature, 리스크, 공고신청 흐름 중 하나 이상에 연결되어야 합니다.
-6. `docs/FundPilot_SYM_project_overview.md`와 이 문서의 현재 상태가 함께 갱신되어야 합니다.
+6. `docs/FundFilot_Demo_project_overview.md`와 이 문서의 현재 상태가 함께 갱신되어야 합니다.

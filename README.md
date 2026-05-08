@@ -1,4 +1,4 @@
-# FundPilot_SYM
+# FundFilot_Demo
 
 FundPilot 프로토타입.
 
@@ -7,8 +7,8 @@ FundPilot 프로토타입.
 ### 깃허브 가져오기
 ```bash
 # 깃허브 repo 끌어오기
-git clone https://github.com/chan1945/FundFilot_SYM.git
-cd FundPilot_SYM
+git clone https://github.com/Trust9864/FundFilot_SYM.git FundFilot_Demo
+cd FundFilot_Demo
 ```
 ### 실행
 ```bash

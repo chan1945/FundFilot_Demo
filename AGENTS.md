@@ -382,7 +382,7 @@ Builder와 Verifier는 다음 규칙을 따른다.
 프로젝트의 주요 내용이 변경될 때마다 다음 문서를 함께 수정한다.
 
 ```text
-/home/huichan/FundFilot_SYM/docs/FundPilot_SYM_project_overview.md
+docs/FundFilot_Demo_project_overview.md
 ```
 
 갱신 대상에는 다음 변경이 포함된다.
