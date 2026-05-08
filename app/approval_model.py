@@ -7,13 +7,15 @@ Synthetic 학습 데이터를 생성하고 RandomForest 분류기로
 """
 
 import os
+import re
+import sqlite3
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 
-from data_store import read_dataset
+from data_store import DB_PATH, ensure_database, read_dataset
 
 # ──────────────────────────────────────────────
 # 공통 설정
@@ -151,6 +153,190 @@ def _get_sales_weights():
 
     total = sum(weights.values())
     return {k: v / total for k, v in weights.items()}
+
+
+def _normalize_text(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).upper()
+
+
+def _read_optional_api_table(table_names: tuple[str, ...]) -> pd.DataFrame:
+    """Return the first populated API-normalized table, if another worker created it."""
+    ensure_database()
+    with sqlite3.connect(DB_PATH) as conn:
+        for table_name in table_names:
+            exists = conn.execute(
+                "select 1 from sqlite_master where type = 'table' and name = ?",
+                (table_name,),
+            ).fetchone()
+            if not exists:
+                continue
+            count = conn.execute(f'select count(*) from "{table_name}"').fetchone()
+            if count and int(count[0]) > 0:
+                return pd.read_sql_query(f'select * from "{table_name}"', conn)
+    return pd.DataFrame()
+
+
+def _find_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    normalized = {_normalize_text(column): column for column in df.columns}
+    for candidate in candidates:
+        column = normalized.get(_normalize_text(candidate))
+        if column:
+            return column
+    return None
+
+
+def _numeric_sum(df: pd.DataFrame, column: str) -> float:
+    if df.empty or column not in df.columns:
+        return 0.0
+    cleaned = (
+        df[column]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+    return float(pd.to_numeric(cleaned, errors="coerce").fillna(0).sum())
+
+
+def _bucket_column_score(
+    df: pd.DataFrame,
+    amount_column_candidates: tuple[str, ...],
+    label_candidates: tuple[str, ...],
+    row_keywords: tuple[str, ...] = (),
+) -> float | None:
+    amount_column = _find_column(df, amount_column_candidates)
+    if df.empty or amount_column is None:
+        return None
+
+    target = df
+    label_column = _find_column(df, label_candidates)
+    if label_column and row_keywords:
+        matched = pd.Series(False, index=df.index)
+        for keyword in row_keywords:
+            matched = matched | df[label_column].astype(str).str.contains(keyword, na=False)
+        if matched.any():
+            target = df.loc[matched]
+
+    all_values = (
+        df[amount_column]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+    numeric = pd.to_numeric(all_values, errors="coerce").fillna(0)
+    mn, mx = float(numeric.min()), float(numeric.max())
+    if mx == mn:
+        return 50.0
+    value = _numeric_sum(target, amount_column)
+    return max(0.0, min((value - mn) / (mx - mn) * 100, 100.0))
+
+
+def _employee_bucket_columns(employee_count: int | None) -> tuple[str, ...]:
+    count = int(employee_count or 0)
+    if count < 5:
+        return ("employee_lt_5_amount", "employee_lt_5_amount_million_krw", "5인미만 금액")
+    if count < 10:
+        return ("employee_lt_10_amount", "employee_lt_10_amount_million_krw", "10인미만 금액")
+    if count < 20:
+        return ("employee_lt_20_amount", "employee_lt_20_amount_million_krw", "20인미만 금액")
+    if count < 50:
+        return ("employee_lt_50_amount", "employee_lt_50_amount_million_krw", "50인미만 금액")
+    if count < 100:
+        return ("employee_lt_100_amount", "employee_lt_100_amount_million_krw", "100인미만 금액")
+    if count < 300:
+        return ("employee_lt_300_amount", "employee_lt_300_amount_million_krw", "300인미만 금액")
+    return ("employee_gte_300_amount", "employee_gte_300_amount_million_krw", "300인이상 금액")
+
+
+def _asset_bucket_columns(asset_total: int | float | None) -> tuple[str, ...]:
+    amount = float(asset_total or 0)
+    if amount < 500_000_000:
+        return ("asset_lt_500m_amount_million_krw", "5억미만 금액(백만원)")
+    if amount < 1_000_000_000:
+        return ("asset_lt_1b_amount_million_krw", "10억미만 금액(백만원)")
+    if amount < 3_000_000_000:
+        return ("asset_lt_3b_amount_million_krw", "30억미만 금액(백만원)")
+    if amount < 5_000_000_000:
+        return ("asset_lt_5b_amount_million_krw", "50억미만 금액(백만원)")
+    if amount < 7_000_000_000:
+        return ("asset_lt_7b_amount_million_krw", "70억미만 금액(백만원)")
+    if amount < 10_000_000_000:
+        return ("asset_lt_10b_amount_million_krw", "100억미만 금액(백만원)")
+    if amount < 20_000_000_000:
+        return ("asset_lt_20b_amount_million_krw", "200억미만 금액(백만원)")
+    if amount < 30_000_000_000:
+        return ("asset_lt_30b_amount_million_krw", "300억미만 금액(백만원)")
+    return ("asset_gte_30b_amount_million_krw", "300억이상 금액(백만원)")
+
+
+def _stored_api_probability_adjustment(
+    employee_count: int | None = None,
+    asset_total: int | float | None = None,
+    region_label: str | None = None,
+    special_tags: list[str] | tuple[str, ...] | None = None,
+) -> float:
+    """Small approval uplift/downshift from already-saved KOSMES API pattern tables."""
+    adjustments: list[float] = []
+
+    employee_df = _read_optional_api_table((
+        "kosmes_policy_fund_employee_size_support_status_long",
+        "kosmes_policy_fund_employee_size_support_status",
+    ))
+    employee_score = _bucket_column_score(
+        employee_df,
+        _employee_bucket_columns(employee_count),
+        ("fund_program_name", "구분"),
+    )
+    if employee_score is not None:
+        adjustments.append((employee_score - 50.0) * 0.05)
+
+    asset_df = _read_optional_api_table((
+        "kosmes_policy_fund_asset_size_support_status_long",
+        "kosmes_policy_fund_asset_size_support_status",
+    ))
+    asset_score = _bucket_column_score(
+        asset_df,
+        _asset_bucket_columns(asset_total),
+        ("fund_program_name", "구분"),
+    )
+    if asset_score is not None:
+        adjustments.append((asset_score - 50.0) * 0.05)
+
+    if region_label:
+        region_df = _read_optional_api_table((
+            "kosmes_regional_support_performance",
+            "kosmes_regional_sme_support_status",
+        ))
+        region_col = _find_column(region_df, ("region_name", "지역", "지역명"))
+        loan_col = _find_column(region_df, (
+            "loaned_total_amount_million_krw",
+            "loan_total_amount_million_krw",
+            "대여금액(합계_백만원)",
+            "지원금액",
+        ))
+        if region_col and loan_col:
+            matched = region_df[region_df[region_col].astype(str).str.contains(region_label, na=False)]
+            if not matched.empty:
+                all_sum = max(_numeric_sum(region_df, loan_col), 1.0)
+                share = _numeric_sum(matched, loan_col) / all_sum
+                adjustments.append(max(-2.0, min((share * len(region_df) - 1.0) * 3.0, 3.0)))
+
+    tags = set(special_tags or [])
+    special_table_map = {
+        "청년": ("kosmes_youth_startup_fund_industry_support", "kosmes_youth_startup_fund_region_support"),
+        "스마트공장": ("kosmes_smart_manufacturing_fund_support", "kosmes_interest_subsidy_smart_manufacturing_support"),
+        "Net-Zero": ("kosmes_interest_subsidy_net_zero_support",),
+        "혁신성장": ("kosmes_interest_subsidy_innovation_growth_support",),
+        "수출": ("kosmes_domestic_to_export_fund_industry_support", "kosmes_export_globalization_fund_business_age_support"),
+        "소부장": ("kosmes_materials_parts_equipment_support",),
+    }
+    for tag, table_names in special_table_map.items():
+        if tag in tags and not _read_optional_api_table(table_names).empty:
+            adjustments.append(1.5)
+
+    if not adjustments:
+        return 0.0
+    return max(-8.0, min(sum(adjustments), 8.0))
 
 
 # ──────────────────────────────────────────────
@@ -308,6 +494,10 @@ def predict_fit_score(
     ceo_age: int,
     has_tax_arrears: bool,
     has_credit_issue: bool,
+    employee_count: int | None = None,
+    asset_total: int | float | None = None,
+    region_label: str | None = None,
+    special_tags: list[str] | tuple[str, ...] | None = None,
 ) -> float:
     """
     입력값을 인코딩하여 RandomForest 모델로 신청 적합도(0~100 %)을 반환합니다.
@@ -334,8 +524,15 @@ def predict_fit_score(
     # 결격 요인 강제 상한
     if has_tax_arrears or has_credit_issue:
         prob = min(prob, 25.0)
+    else:
+        prob += _stored_api_probability_adjustment(
+            employee_count=employee_count,
+            asset_total=asset_total,
+            region_label=region_label,
+            special_tags=special_tags,
+        )
 
-    return round(prob, 1)
+    return round(max(0.0, min(prob, 97.0)), 1)
 
 
 # 기존 app.py 호환용 별칭

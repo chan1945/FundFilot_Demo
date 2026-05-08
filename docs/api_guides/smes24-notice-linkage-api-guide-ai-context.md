@@ -43,13 +43,14 @@ Important notes:
 
 - The `token` must be issued by the relevant SMES24/TIPA process.
 - When calling the API using `GET`, the `token` value must be **URL encoded**.
+- FundPilot stores the key in `SMES24_OPENAPI_TOKEN`. The value may be raw or already URL-encoded; the client normalizes it before calling the API to avoid double encoding.
 - If the token is invalid or not authorized for this API, the API returns an authentication-related result code.
 
 Recommended environment variable:
 
 ```env
 # SMES24 notice information API token
-SMES24_NOTICE_API_TOKEN=
+SMES24_OPENAPI_TOKEN=
 ```
 
 ---
@@ -187,7 +188,7 @@ The `data` array contains notice objects. Each object may include the following 
 | Code | Message | Meaning / System Handling |
 |---|---|---|
 | `0` | 정상적으로 조회 되었습니다. | Success. Store or update notice data. |
-| `9` | 인증키 오류. 허용되지 않은 인증키입니다. | Invalid or unauthorized token. Check `SMES24_NOTICE_API_TOKEN`. |
+| `9` | 인증키 오류. 허용되지 않은 인증키입니다. | Invalid or unauthorized token. Check `SMES24_OPENAPI_TOKEN` and avoid double-encoded query values. |
 | `10` | 인증키 오류. 해당 API의 인증키가 아닙니다. | Token exists but is not authorized for this specific API. Confirm API approval scope. |
 | `11` | 시작일자 길이 오류 | `strDt` length/format error. Must be `yyyyMMdd`. |
 | `12` | 종료일자 길이 오류 | `endDt` length/format error. Must be `yyyyMMdd`. |
@@ -380,7 +381,7 @@ The `data` array contains notice objects. Each object may include the following 
 $.ajax({
   url: 'https://www.smes.go.kr/fnct/apiReqst/extPblancInfo',
   data: {
-    token: 'YOUR_SMES24_NOTICE_API_TOKEN',
+    token: 'YOUR_SMES24_OPENAPI_TOKEN',
     strDt: '20221101',
     endDt: '20221131'
   },
@@ -548,4 +549,3 @@ This reduces HTML cleanup work for text indexing and summarization.
 10. The guide contains a field named `mixEmplyCnt`, which appears to mean maximum employee count. Preserve the source field name when parsing.
 
 ---
-

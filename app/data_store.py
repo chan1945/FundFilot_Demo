@@ -9,16 +9,19 @@ stable data layer instead of scanning CSV files directly.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "fundpilot.db"
+POLICY_FUND_DETAIL_PATH = PROJECT_ROOT / "docs" / "policy_fund" / "policy_fund_detail.md"
 
 CSV_DATASETS = [
     ("매출액 규모별 지원실적", "support_stats_sales"),
@@ -64,6 +67,15 @@ EXCLUDED_INDUSTRY_CATEGORY_COLUMNS = (
     "업종분류",
 )
 
+SENSITIVE_PARAM_NAMES = (
+    "serviceKey",
+    "token",
+    "Key",
+    "Authorization",
+    "SMES24_OPENAPI_TOKEN",
+    "DATA_GO_KR_SERVICE_KEY",
+)
+
 
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -77,6 +89,73 @@ def _read_csv_auto(path: Path) -> pd.DataFrame:
         except Exception:
             pass
     return pd.DataFrame()
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    text = line.strip()
+    if not text.startswith("|") or not text.endswith("|"):
+        return []
+    return [re.sub(r"\s+", " ", cell).strip() for cell in text.strip("|").split("|")]
+
+
+def _markdown_reference_urls(lines: list[str]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for line in lines:
+        match = re.match(r"\[(\d+)\]:\s+(\S+)", line.strip())
+        if match:
+            refs[match.group(1)] = match.group(2)
+    return refs
+
+
+def _resolve_policy_source_url(value: str, refs: dict[str, str]) -> str:
+    match = re.search(r"\[코스메스\]\[(\d+)\]", str(value or ""))
+    if not match:
+        return ""
+    return refs.get(match.group(1), "")
+
+
+def read_policy_fund_summaries(path: Path | None = None) -> list[dict[str, str]]:
+    """Read policy-fund summary rows from docs/policy_fund/policy_fund_detail.md."""
+
+    source_path = path or POLICY_FUND_DETAIL_PATH
+    if not source_path.exists():
+        return []
+
+    lines = source_path.read_text(encoding="utf-8").splitlines()
+    refs = _markdown_reference_urls(lines)
+    in_summary_section = False
+    headers: list[str] = []
+    rows: list[dict[str, str]] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_summary_section = stripped == "## 요약 내용"
+            if headers and stripped != "## 요약 내용":
+                break
+            continue
+        if not in_summary_section:
+            continue
+        if not stripped.startswith("|"):
+            if headers and rows:
+                break
+            continue
+
+        cells = _split_markdown_table_row(stripped)
+        if not cells:
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        if not headers:
+            headers = cells
+            continue
+        if len(cells) < len(headers):
+            cells.extend([""] * (len(headers) - len(cells)))
+        row = dict(zip(headers, cells[: len(headers)]))
+        row["출처 URL"] = _resolve_policy_source_url(row.get("출처", ""), refs)
+        rows.append(row)
+
+    return [row for row in rows if row.get("정책자금명")]
 
 
 def _find_csv(dataset_key: str) -> Path | None:
@@ -135,9 +214,18 @@ def _create_metadata_tables(conn: sqlite3.Connection) -> None:
             base_url text not null,
             endpoint_path text not null,
             env_var_name text not null,
+            request_method text not null default 'GET',
+            auth_location text not null default 'query',
+            auth_param_name text not null default 'serviceKey',
+            pagination_style text not null default 'none',
             default_page integer not null,
             default_per_page integer not null,
             default_return_type text not null,
+            default_params_json text not null default '{}',
+            endpoint_variants_json text not null default '[]',
+            guide_path text,
+            storage_table text,
+            source_notes text,
             enabled integer not null default 1,
             created_at text not null,
             updated_at text not null
@@ -174,6 +262,35 @@ def _create_metadata_tables(conn: sqlite3.Connection) -> None:
             http_status integer,
             fetched_at text not null
         )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists api_normalized_records (
+            id integer primary key autoincrement,
+            api_key text not null,
+            storage_table text not null,
+            dataset_date text,
+            source_endpoint_path text not null,
+            record_index integer not null,
+            record_hash text not null,
+            normalized_json text not null,
+            raw_json text not null,
+            synced_at text not null,
+            unique (
+                api_key,
+                storage_table,
+                dataset_date,
+                source_endpoint_path,
+                record_hash
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_api_normalized_records_lookup
+        on api_normalized_records(api_key, storage_table, dataset_date)
         """
     )
     conn.execute(
@@ -275,6 +392,229 @@ def _create_metadata_tables(conn: sqlite3.Connection) -> None:
         on company_financial_summaries(corporate_registration_number, business_year)
         """
     )
+    conn.execute(
+        """
+        create table if not exists sole_prop_finance_stats (
+            id integer primary key autoincrement,
+            base_year_month text,
+            finance_base_year text,
+            business_area_name text,
+            industry_code text,
+            industry_name text,
+            employee_count_band text,
+            sales_amount numeric,
+            operating_profit numeric,
+            net_profit numeric,
+            total_assets numeric,
+            total_debt numeric,
+            capital_amount numeric,
+            raw_json text not null,
+            source_endpoint_path text not null,
+            synced_at text not null,
+            unique (
+                base_year_month,
+                finance_base_year,
+                business_area_name,
+                industry_code,
+                industry_name,
+                employee_count_band,
+                source_endpoint_path
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_sole_prop_finance_area_industry
+        on sole_prop_finance_stats(business_area_name, industry_name)
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists kosmes_support_statistics (
+            id integer primary key autoincrement,
+            dataset_key text not null,
+            api_name text not null,
+            snapshot_date text,
+            source_endpoint_path text not null,
+            source_row_number integer,
+            dimension_type text,
+            dimension_label text,
+            fund_program_name text,
+            program_group text,
+            support_year text,
+            region_name text,
+            industry_name text,
+            industry_classification_name text,
+            business_age_bucket text,
+            employee_size_bucket text,
+            asset_size_bucket text,
+            sales_size_bucket text,
+            fund_type_name text,
+            usage_category text,
+            application_reason text,
+            loan_date text,
+            loan_year text,
+            loan_month text,
+            support_count numeric,
+            support_amount_million_krw numeric,
+            application_count numeric,
+            application_amount_million_krw numeric,
+            approval_decision_count numeric,
+            approval_decision_amount_million_krw numeric,
+            loan_count numeric,
+            loan_amount_million_krw numeric,
+            requested_facility_amount_million_krw numeric,
+            requested_working_amount_million_krw numeric,
+            requested_total_amount_million_krw numeric,
+            recommended_facility_amount_million_krw numeric,
+            recommended_working_amount_million_krw numeric,
+            recommended_total_amount_million_krw numeric,
+            loaned_facility_amount_million_krw numeric,
+            loaned_working_amount_million_krw numeric,
+            loaned_total_amount_million_krw numeric,
+            supplied_facility_amount_million_krw numeric,
+            supplied_working_amount_million_krw numeric,
+            supplied_total_amount_million_krw numeric,
+            raw_json text not null,
+            synced_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_kosmes_support_statistics_dataset
+        on kosmes_support_statistics(dataset_key, snapshot_date)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_kosmes_support_statistics_lookup
+        on kosmes_support_statistics(
+            dimension_type, region_name, industry_name, business_age_bucket,
+            employee_size_bucket, asset_size_bucket, fund_type_name
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists external_notices (
+            id integer primary key autoincrement,
+            notice_key text not null unique,
+            pblanc_seq text,
+            title text,
+            detail_business_name text,
+            detail_url text,
+            application_url text,
+            created_at_source text,
+            updated_at_source text,
+            application_start_date text,
+            application_end_date text,
+            overview text,
+            support_scale text,
+            support_content text,
+            support_target text,
+            application_method text,
+            support_institution_name text,
+            support_institution_code text,
+            business_type text,
+            business_type_code text,
+            support_type text,
+            support_type_code text,
+            area_names text,
+            area_codes text,
+            required_certifications text,
+            required_certification_codes text,
+            contact_url text,
+            notice_file_url text,
+            notice_file_name text,
+            attachment_urls text,
+            attachment_names text,
+            raw_json text not null,
+            source_endpoint_path text not null,
+            synced_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_external_notices_dates
+        on external_notices(application_start_date, application_end_date)
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_external_notices_title
+        on external_notices(title, detail_business_name)
+        """
+    )
+    _ensure_api_registry_columns(conn)
+
+
+def _ensure_api_registry_columns(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute('pragma table_info("api_registry")')}
+    migrations = {
+        "request_method": "alter table api_registry add column request_method text not null default 'GET'",
+        "auth_location": "alter table api_registry add column auth_location text not null default 'query'",
+        "auth_param_name": (
+            "alter table api_registry add column "
+            "auth_param_name text not null default 'serviceKey'"
+        ),
+        "pagination_style": (
+            "alter table api_registry add column pagination_style text not null default 'none'"
+        ),
+        "default_params_json": (
+            "alter table api_registry add column default_params_json text not null default '{}'"
+        ),
+        "endpoint_variants_json": (
+            "alter table api_registry add column endpoint_variants_json text not null default '[]'"
+        ),
+        "guide_path": "alter table api_registry add column guide_path text",
+        "storage_table": "alter table api_registry add column storage_table text",
+        "source_notes": "alter table api_registry add column source_notes text",
+    }
+    for column, statement in migrations.items():
+        if column not in columns:
+            conn.execute(statement)
+
+
+def sanitize_secret_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    text = re.sub(r"(?i)(Authorization\s*:\s*Bearer\s+)[^\s,\"'}}]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(Bearer\s+)[^\s,\"'}}]+", r"\1[REDACTED]", text)
+    for name in SENSITIVE_PARAM_NAMES:
+        # URL/query style: serviceKey=SECRET, token: SECRET
+        text = re.sub(
+            rf"(?i)({re.escape(name)})(\s*[:=]\s*)([^&\s,\"'}}]+)",
+            rf"\1\2[REDACTED]",
+            text,
+        )
+        # JSON/string style: "serviceKey": "SECRET", 'token': 'SECRET'
+        text = re.sub(
+            rf"(?i)([\"']{re.escape(name)}[\"']\s*:\s*[\"'])(.*?)([\"'])",
+            rf"\1[REDACTED]\3",
+            text,
+        )
+    return text
+
+
+def _redact_mapping(values: object) -> object:
+    sensitive_names = {name.lower() for name in SENSITIVE_PARAM_NAMES}
+    if isinstance(values, dict):
+        redacted = {}
+        for key, value in values.items():
+            if str(key).lower() in sensitive_names:
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_mapping(value)
+        return redacted
+    if isinstance(values, list):
+        return [_redact_mapping(value) for value in values]
+    if isinstance(values, tuple):
+        return tuple(_redact_mapping(value) for value in values)
+    return values
 
 
 def _load_dataset(conn: sqlite3.Connection, dataset_key: str, table_name: str, path: Path) -> None:
@@ -359,31 +699,61 @@ def register_api_endpoint(
     base_url: str,
     endpoint_path: str,
     env_var_name: str,
+    request_method: str = "GET",
+    auth_location: str = "query",
+    auth_param_name: str = "serviceKey",
+    pagination_style: str = "none",
     default_page: int = 1,
     default_per_page: int = 1000,
     default_return_type: str = "JSON",
+    default_params: dict[str, object] | None = None,
+    endpoint_variants: list[dict[str, object]] | None = None,
+    guide_path: str | None = None,
+    storage_table: str | None = None,
+    source_notes: str | None = None,
     enabled: bool = True,
 ) -> None:
     ensure_api_tables()
     now = datetime.now().isoformat(timespec="seconds")
+    default_params_json = json.dumps(
+        _redact_mapping(default_params or {}),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    endpoint_variants_json = json.dumps(
+        endpoint_variants or [],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     with connect() as conn:
         conn.execute(
             """
             insert into api_registry (
                 api_key, api_name, provider, base_url, endpoint_path, env_var_name,
-                default_page, default_per_page, default_return_type, enabled,
-                created_at, updated_at
+                request_method, auth_location, auth_param_name, pagination_style,
+                default_page, default_per_page, default_return_type,
+                default_params_json, endpoint_variants_json, guide_path,
+                storage_table, source_notes, enabled, created_at, updated_at
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(api_key) do update set
                 api_name = excluded.api_name,
                 provider = excluded.provider,
                 base_url = excluded.base_url,
                 endpoint_path = excluded.endpoint_path,
                 env_var_name = excluded.env_var_name,
+                request_method = excluded.request_method,
+                auth_location = excluded.auth_location,
+                auth_param_name = excluded.auth_param_name,
+                pagination_style = excluded.pagination_style,
                 default_page = excluded.default_page,
                 default_per_page = excluded.default_per_page,
                 default_return_type = excluded.default_return_type,
+                default_params_json = excluded.default_params_json,
+                endpoint_variants_json = excluded.endpoint_variants_json,
+                guide_path = excluded.guide_path,
+                storage_table = excluded.storage_table,
+                source_notes = excluded.source_notes,
                 enabled = excluded.enabled,
                 updated_at = excluded.updated_at
             """,
@@ -394,9 +764,18 @@ def register_api_endpoint(
                 base_url,
                 endpoint_path,
                 env_var_name,
+                request_method.upper(),
+                auth_location,
+                auth_param_name,
+                pagination_style,
                 int(default_page),
                 int(default_per_page),
                 default_return_type,
+                default_params_json,
+                endpoint_variants_json,
+                guide_path,
+                storage_table,
+                source_notes,
                 1 if enabled else 0,
                 now,
                 now,
@@ -434,7 +813,7 @@ def log_api_fetch(
                 row_count,
                 page,
                 per_page,
-                error_message,
+                sanitize_secret_text(error_message),
                 fetched_at,
             ),
         )
@@ -472,14 +851,298 @@ def save_api_raw_cache(
                 cache_key,
                 api_key,
                 endpoint_path,
-                request_url,
-                request_params_json,
-                response_text,
+                sanitize_secret_text(request_url) or "",
+                sanitize_secret_text(request_params_json) or "{}",
+                sanitize_secret_text(response_text) or "",
                 http_status,
                 fetched_at,
             ),
         )
         conn.commit()
+
+
+def save_api_normalized_records(
+    api_key: str,
+    storage_table: str,
+    records: list[dict[str, object]],
+    source_path: str,
+    dataset_date: str | None = None,
+) -> int:
+    """Persist generic raw+normalized API rows for APIs without a dedicated table."""
+
+    ensure_api_tables()
+    synced_at = datetime.now().isoformat(timespec="seconds")
+    rows = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        raw_json = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        record_hash = hashlib.sha256(raw_json.encode("utf-8")).hexdigest()
+        rows.append(
+            (
+                api_key,
+                storage_table,
+                dataset_date,
+                source_path,
+                index,
+                record_hash,
+                raw_json,
+                raw_json,
+                synced_at,
+            )
+        )
+
+    with connect() as conn:
+        if rows:
+            conn.executemany(
+                """
+                insert into api_normalized_records (
+                    api_key, storage_table, dataset_date, source_endpoint_path,
+                    record_index, record_hash, normalized_json, raw_json, synced_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict (
+                    api_key,
+                    storage_table,
+                    dataset_date,
+                    source_endpoint_path,
+                    record_hash
+                ) do update set
+                    record_index = excluded.record_index,
+                    normalized_json = excluded.normalized_json,
+                    raw_json = excluded.raw_json,
+                    synced_at = excluded.synced_at
+                """,
+                rows,
+            )
+        conn.commit()
+    return len(rows)
+
+
+def save_external_notices(
+    records: list[dict[str, object]],
+    source_path: str,
+) -> int:
+    """Persist normalized SMES24 notice linkage rows for cached notice analysis."""
+
+    ensure_api_tables()
+    synced_at = datetime.now().isoformat(timespec="seconds")
+    normalized_rows = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        raw_json = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        normalized_rows.append(
+            (
+                _external_notice_key(record),
+                _clean_optional_value(record.get("pblancSeq")),
+                _clean_optional_value(record.get("pblancNm")),
+                _clean_optional_value(record.get("detailBsnsNm")),
+                _clean_optional_value(record.get("pblancDtlUrl")),
+                _clean_optional_value(record.get("reqstLinkInfo")),
+                _clean_optional_value(record.get("creatDt")),
+                _clean_optional_value(record.get("updDt")),
+                _clean_optional_value(record.get("pblancBgnDt")),
+                _clean_optional_value(record.get("pblancEndDt")),
+                _clean_optional_value(record.get("policyCnts")),
+                _clean_optional_value(record.get("sportMg")),
+                _clean_optional_value(record.get("sportCnts")),
+                _clean_optional_value(record.get("sportTrget")),
+                _clean_optional_value(record.get("reqstRcept")),
+                _clean_optional_value(record.get("sportInsttNm")),
+                _clean_optional_value(record.get("sportInsttCd")),
+                _clean_optional_value(record.get("bizType")),
+                _clean_optional_value(record.get("bizTypeCd")),
+                _clean_optional_value(record.get("sportType")),
+                _clean_optional_value(record.get("sportTypeCd")),
+                _clean_optional_value(record.get("areaNm")),
+                _clean_optional_value(record.get("areaCd")),
+                _clean_optional_value(record.get("needCrtfn")),
+                _clean_optional_value(record.get("needCrtfnCd")),
+                _clean_optional_value(record.get("refrncUrl")),
+                _clean_optional_value(record.get("pblancFileUrl")),
+                _clean_optional_value(record.get("pblancFileNm")),
+                _clean_optional_value(record.get("pblancAttach")),
+                _clean_optional_value(record.get("pblancAttachNm")),
+                raw_json,
+                source_path,
+                synced_at,
+            )
+        )
+
+    with connect() as conn:
+        if normalized_rows:
+            conn.executemany(
+                """
+                insert into external_notices (
+                    notice_key, pblanc_seq, title, detail_business_name,
+                    detail_url, application_url, created_at_source,
+                    updated_at_source, application_start_date, application_end_date,
+                    overview, support_scale, support_content, support_target,
+                    application_method, support_institution_name,
+                    support_institution_code, business_type, business_type_code,
+                    support_type, support_type_code, area_names, area_codes,
+                    required_certifications, required_certification_codes,
+                    contact_url, notice_file_url, notice_file_name,
+                    attachment_urls, attachment_names, raw_json,
+                    source_endpoint_path, synced_at
+                )
+                values (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                on conflict(notice_key) do update set
+                    pblanc_seq = excluded.pblanc_seq,
+                    title = excluded.title,
+                    detail_business_name = excluded.detail_business_name,
+                    detail_url = excluded.detail_url,
+                    application_url = excluded.application_url,
+                    created_at_source = excluded.created_at_source,
+                    updated_at_source = excluded.updated_at_source,
+                    application_start_date = excluded.application_start_date,
+                    application_end_date = excluded.application_end_date,
+                    overview = excluded.overview,
+                    support_scale = excluded.support_scale,
+                    support_content = excluded.support_content,
+                    support_target = excluded.support_target,
+                    application_method = excluded.application_method,
+                    support_institution_name = excluded.support_institution_name,
+                    support_institution_code = excluded.support_institution_code,
+                    business_type = excluded.business_type,
+                    business_type_code = excluded.business_type_code,
+                    support_type = excluded.support_type,
+                    support_type_code = excluded.support_type_code,
+                    area_names = excluded.area_names,
+                    area_codes = excluded.area_codes,
+                    required_certifications = excluded.required_certifications,
+                    required_certification_codes = excluded.required_certification_codes,
+                    contact_url = excluded.contact_url,
+                    notice_file_url = excluded.notice_file_url,
+                    notice_file_name = excluded.notice_file_name,
+                    attachment_urls = excluded.attachment_urls,
+                    attachment_names = excluded.attachment_names,
+                    raw_json = excluded.raw_json,
+                    source_endpoint_path = excluded.source_endpoint_path,
+                    synced_at = excluded.synced_at
+                """,
+                normalized_rows,
+            )
+        conn.commit()
+    return len(normalized_rows)
+
+
+def save_kosmes_support_statistics(
+    records: list[dict[str, object]],
+    dataset_key: str,
+    api_name: str,
+    snapshot_date: str | None,
+    source_path: str,
+    dimension_type: str,
+) -> int:
+    """Persist KOSMES support-stat rows in a common query shape."""
+
+    ensure_api_tables()
+    synced_at = datetime.now().isoformat(timespec="seconds")
+    normalized_rows: list[tuple[object, ...]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for normalized in _normalize_kosmes_support_record(record, dimension_type):
+            normalized_rows.append(
+                (
+                    dataset_key,
+                    api_name,
+                    snapshot_date,
+                    source_path,
+                    _clean_integer_value(normalized.get("source_row_number")),
+                    dimension_type,
+                    normalized.get("dimension_label"),
+                    normalized.get("fund_program_name"),
+                    normalized.get("program_group"),
+                    normalized.get("support_year"),
+                    normalized.get("region_name"),
+                    normalized.get("industry_name"),
+                    normalized.get("industry_classification_name"),
+                    normalized.get("business_age_bucket"),
+                    normalized.get("employee_size_bucket"),
+                    normalized.get("asset_size_bucket"),
+                    normalized.get("sales_size_bucket"),
+                    normalized.get("fund_type_name"),
+                    normalized.get("usage_category"),
+                    normalized.get("application_reason"),
+                    normalized.get("loan_date"),
+                    normalized.get("loan_year"),
+                    normalized.get("loan_month"),
+                    normalized.get("support_count"),
+                    normalized.get("support_amount_million_krw"),
+                    normalized.get("application_count"),
+                    normalized.get("application_amount_million_krw"),
+                    normalized.get("approval_decision_count"),
+                    normalized.get("approval_decision_amount_million_krw"),
+                    normalized.get("loan_count"),
+                    normalized.get("loan_amount_million_krw"),
+                    normalized.get("requested_facility_amount_million_krw"),
+                    normalized.get("requested_working_amount_million_krw"),
+                    normalized.get("requested_total_amount_million_krw"),
+                    normalized.get("recommended_facility_amount_million_krw"),
+                    normalized.get("recommended_working_amount_million_krw"),
+                    normalized.get("recommended_total_amount_million_krw"),
+                    normalized.get("loaned_facility_amount_million_krw"),
+                    normalized.get("loaned_working_amount_million_krw"),
+                    normalized.get("loaned_total_amount_million_krw"),
+                    normalized.get("supplied_facility_amount_million_krw"),
+                    normalized.get("supplied_working_amount_million_krw"),
+                    normalized.get("supplied_total_amount_million_krw"),
+                    json.dumps(record, ensure_ascii=False, sort_keys=True),
+                    synced_at,
+                )
+            )
+
+    with connect() as conn:
+        conn.execute(
+            """
+            delete from kosmes_support_statistics
+            where dataset_key = ? and source_endpoint_path = ?
+            """,
+            (dataset_key, source_path),
+        )
+        if normalized_rows:
+            conn.executemany(
+                """
+                insert into kosmes_support_statistics (
+                    dataset_key, api_name, snapshot_date, source_endpoint_path,
+                    source_row_number, dimension_type, dimension_label,
+                    fund_program_name, program_group, support_year, region_name,
+                    industry_name, industry_classification_name,
+                    business_age_bucket, employee_size_bucket, asset_size_bucket,
+                    sales_size_bucket, fund_type_name, usage_category,
+                    application_reason, loan_date, loan_year, loan_month,
+                    support_count, support_amount_million_krw, application_count,
+                    application_amount_million_krw, approval_decision_count,
+                    approval_decision_amount_million_krw, loan_count,
+                    loan_amount_million_krw, requested_facility_amount_million_krw,
+                    requested_working_amount_million_krw,
+                    requested_total_amount_million_krw,
+                    recommended_facility_amount_million_krw,
+                    recommended_working_amount_million_krw,
+                    recommended_total_amount_million_krw,
+                    loaned_facility_amount_million_krw,
+                    loaned_working_amount_million_krw,
+                    loaned_total_amount_million_krw,
+                    supplied_facility_amount_million_krw,
+                    supplied_working_amount_million_krw,
+                    supplied_total_amount_million_krw, raw_json, synced_at
+                )
+                values (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                )
+                """,
+                normalized_rows,
+            )
+        conn.commit()
+    return len(normalized_rows)
 
 
 def save_kosmes_excluded_industries(
@@ -694,6 +1357,74 @@ def save_company_financial_summaries(
     return len(normalized_rows)
 
 
+def save_sole_prop_finance_stats(
+    records: list[dict[str, object]],
+    source_path: str,
+) -> int:
+    """Persist personal business finance benchmark rows from 금융위원회."""
+
+    ensure_api_tables()
+    synced_at = datetime.now().isoformat(timespec="seconds")
+    normalized_rows = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        normalized_rows.append(
+            (
+                _clean_optional_value(record.get("basYm")),
+                _clean_optional_value(record.get("fnafBasYr")),
+                _clean_optional_value(record.get("bizAreaNm")),
+                _clean_optional_value(record.get("bizBzcCd")),
+                _clean_optional_value(record.get("bizBzcCdNm")),
+                _clean_optional_value(record.get("empeCntNm")),
+                _clean_numeric_value(record.get("saleAmt")),
+                _clean_numeric_value(record.get("bzopPftAmt")),
+                _clean_numeric_value(record.get("crtmNpfAmt")),
+                _clean_numeric_value(record.get("astTsumAmt")),
+                _clean_numeric_value(record.get("debtTsumAmt")),
+                _clean_numeric_value(record.get("cptlAmt")),
+                json.dumps(record, ensure_ascii=False, sort_keys=True),
+                source_path,
+                synced_at,
+            )
+        )
+
+    with connect() as conn:
+        if normalized_rows:
+            conn.executemany(
+                """
+                insert into sole_prop_finance_stats (
+                    base_year_month, finance_base_year, business_area_name,
+                    industry_code, industry_name, employee_count_band,
+                    sales_amount, operating_profit, net_profit, total_assets,
+                    total_debt, capital_amount, raw_json, source_endpoint_path,
+                    synced_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict (
+                    base_year_month,
+                    finance_base_year,
+                    business_area_name,
+                    industry_code,
+                    industry_name,
+                    employee_count_band,
+                    source_endpoint_path
+                ) do update set
+                    sales_amount = excluded.sales_amount,
+                    operating_profit = excluded.operating_profit,
+                    net_profit = excluded.net_profit,
+                    total_assets = excluded.total_assets,
+                    total_debt = excluded.total_debt,
+                    capital_amount = excluded.capital_amount,
+                    raw_json = excluded.raw_json,
+                    synced_at = excluded.synced_at
+                """,
+                normalized_rows,
+            )
+        conn.commit()
+    return len(normalized_rows)
+
+
 def normalize_ksic_code(value: object) -> str:
     text = str(value or "").split("-")[0].strip().upper()
     return re.sub(r"[^0-9A-Z]", "", text)
@@ -733,6 +1464,17 @@ def _clean_optional_value(value: object) -> str | None:
     return text or None
 
 
+def _external_notice_key(record: dict[str, object]) -> str:
+    seq = _clean_optional_value(record.get("pblancSeq"))
+    if seq:
+        return seq
+    raw = "|".join(
+        str(record.get(key) or "")
+        for key in ("pblancNm", "detailBsnsNm", "pblancDtlUrl", "pblancBgnDt", "pblancEndDt")
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _clean_integer_value(value: object) -> int | None:
     text = str(value or "").strip().replace(",", "")
     if not text:
@@ -745,9 +1487,225 @@ def _clean_integer_value(value: object) -> int | None:
 
 def _clean_numeric_value(value: object) -> str | None:
     text = str(value or "").strip().replace(",", "")
-    if not text or text in {"-", "N/A", "nan"}:
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(백만원|만원|원|건|개)$", "", text)
+    if not text or text in {"-", "N/A", "nan", "None"}:
         return None
     return text
+
+
+def _record_value(record: dict[str, object], candidates: tuple[str, ...]) -> object | None:
+    key = _first_existing_key(record, candidates)
+    return record.get(key) if key else None
+
+
+def _clean_metric_value(record: dict[str, object], candidates: tuple[str, ...]) -> str | None:
+    return _clean_numeric_value(_record_value(record, candidates))
+
+
+def _normalize_kosmes_support_record(
+    record: dict[str, object],
+    dimension_type: str,
+) -> list[dict[str, Any]]:
+    base = _kosmes_support_base_fields(record)
+    metrics = _kosmes_support_metric_fields(record)
+    bucket_rows = _kosmes_bucket_metric_rows(record, dimension_type)
+    if not bucket_rows:
+        row = {**base, **metrics}
+        row["dimension_label"] = _dimension_label(row, dimension_type)
+        return [row]
+
+    normalized_rows: list[dict[str, Any]] = []
+    for bucket_row in bucket_rows:
+        row = {**base, **metrics, **bucket_row}
+        row["dimension_label"] = bucket_row.get("dimension_label")
+        normalized_rows.append(row)
+    return normalized_rows
+
+
+def _kosmes_support_base_fields(record: dict[str, object]) -> dict[str, object | None]:
+    loan_year = _clean_optional_value(_record_value(record, ("대출년도", "LN_YR")))
+    loan_month = _clean_optional_value(_record_value(record, ("대출월", "LN_MM")))
+    loan_date = _clean_optional_value(_record_value(record, ("대출일자",)))
+    if not loan_date and loan_year and loan_month:
+        loan_date = f"{loan_year}-{str(loan_month).zfill(2)}"
+
+    fund_program_name = _clean_optional_value(
+        _record_value(
+            record,
+            (
+                "구분",
+                "사업2",
+                "사업명",
+                "세부사업명",
+                "정책자금명",
+                "자금명",
+                "자금종류",
+                "지원자금",
+            ),
+        )
+    )
+    fund_type_name = _clean_optional_value(
+        _record_value(record, ("자금종류", "자금명", "정책자금명", "구분"))
+    )
+
+    return {
+        "source_row_number": _record_value(record, ("일련번호", "순번", "번호")),
+        "fund_program_name": fund_program_name,
+        "program_group": _clean_optional_value(_record_value(record, ("사업1", "사업구분"))),
+        "support_year": _clean_optional_value(_record_value(record, ("지원연도", "연도", "대출년도", "LN_YR"))),
+        "region_name": _clean_optional_value(
+            _record_value(
+                record,
+                (
+                    "지역",
+                    "지역명",
+                    "지원지역",
+                    "권역",
+                    "관할지역",
+                    "지역구분(중진공)",
+                    "ARA_NM",
+                ),
+            )
+        ),
+        "industry_name": _clean_optional_value(_record_value(record, ("업종", "업종명", "업종별", "BTP_NM"))),
+        "industry_classification_name": _clean_optional_value(
+            _record_value(record, ("산업분류코드명", "IND_CL_CD_NM"))
+        ),
+        "business_age_bucket": _clean_optional_value(
+            _record_value(record, ("업력", "업력구분", "업력구분(중진공)", "COHIS_DIT_CD_NM"))
+        ),
+        "employee_size_bucket": _clean_optional_value(_record_value(record, ("종업원규모", "종업원 규모"))),
+        "asset_size_bucket": _clean_optional_value(_record_value(record, ("자산규모", "자산 규모"))),
+        "sales_size_bucket": _clean_optional_value(_record_value(record, ("매출규모", "매출 규모"))),
+        "fund_type_name": fund_type_name,
+        "usage_category": _clean_optional_value(_record_value(record, ("용도구분", "자금용도"))),
+        "application_reason": _clean_optional_value(_record_value(record, ("신청사유",))),
+        "loan_date": loan_date,
+        "loan_year": loan_year,
+        "loan_month": loan_month,
+    }
+
+
+def _kosmes_support_metric_fields(record: dict[str, object]) -> dict[str, object | None]:
+    return {
+        "support_count": _clean_metric_value(record, ("지원건수", "지원건수(건)", "지원업체수", "업체수")),
+        "support_amount_million_krw": _clean_metric_value(
+            record,
+            (
+                "지원금액(백만원)",
+                "지원금액_백만원",
+                "지원금액(합계_백만원)",
+                "지원금액(합계)",
+                "지원금액",
+            ),
+        ),
+        "application_count": _clean_metric_value(record, ("신청건수", "신청건수(건)")),
+        "application_amount_million_krw": _clean_metric_value(
+            record,
+            ("신청금액(합계_백만원)", "신청금액(합계)", "신청금액"),
+        ),
+        "approval_decision_count": _clean_metric_value(
+            record,
+            ("지원결정건수", "지원결정건수(건)", "추천건수", "추천건수(건)"),
+        ),
+        "approval_decision_amount_million_krw": _clean_metric_value(
+            record,
+            ("지원결정금액", "지원결정금액(백만원)", "추천금액(합계_백만원)", "추천금액(합계)", "추천금액"),
+        ),
+        "loan_count": _clean_metric_value(record, ("대출건수", "대출건수(건)", "대여건수")),
+        "loan_amount_million_krw": _clean_metric_value(
+            record,
+            (
+                "대출금액(백만원)",
+                "대출금액_백만원",
+                "대출금액",
+                "대여금액(합계_백만원)",
+                "대여금액(합계)",
+                "LN_AMT",
+            ),
+        ),
+        "requested_facility_amount_million_krw": _clean_metric_value(record, ("신청금액(시설_백만원)", "신청금액(시설)")),
+        "requested_working_amount_million_krw": _clean_metric_value(record, ("신청금액(운전_백만원)", "신청금액(운전)")),
+        "requested_total_amount_million_krw": _clean_metric_value(record, ("신청금액(합계_백만원)", "신청금액(합계)")),
+        "recommended_facility_amount_million_krw": _clean_metric_value(record, ("추천금액(시설_백만원)", "추천금액(시설)")),
+        "recommended_working_amount_million_krw": _clean_metric_value(record, ("추천금액(운전_백만원)", "추천금액(운전)")),
+        "recommended_total_amount_million_krw": _clean_metric_value(record, ("추천금액(합계_백만원)", "추천금액(합계)")),
+        "loaned_facility_amount_million_krw": _clean_metric_value(
+            record,
+            ("대여금액(시설_백만원)", "대여금액(시설)", "공급금액(시설_백만원)", "공급금액(시설)"),
+        ),
+        "loaned_working_amount_million_krw": _clean_metric_value(
+            record,
+            ("대여금액(운전_백만원)", "대여금액(운전)", "공급금액(운전_백만원)", "공급금액(운전)"),
+        ),
+        "loaned_total_amount_million_krw": _clean_metric_value(
+            record,
+            ("대여금액(합계_백만원)", "대여금액(합계)", "공급금액(합계_백만원)", "공급금액(합계)"),
+        ),
+        "supplied_facility_amount_million_krw": _clean_metric_value(record, ("공급금액(시설_백만원)", "공급금액(시설)")),
+        "supplied_working_amount_million_krw": _clean_metric_value(record, ("공급금액(운전_백만원)", "공급금액(운전)")),
+        "supplied_total_amount_million_krw": _clean_metric_value(record, ("공급금액(합계_백만원)", "공급금액(합계)")),
+    }
+
+
+def _kosmes_bucket_metric_rows(
+    record: dict[str, object],
+    dimension_type: str,
+) -> list[dict[str, object | None]]:
+    if dimension_type not in {"employee_size", "asset_size", "business_age", "industry"}:
+        return []
+
+    buckets: dict[str, dict[str, object | None]] = {}
+    for key, value in record.items():
+        metric_type = _bucket_metric_type(key)
+        if metric_type is None:
+            continue
+        label = _bucket_label_from_metric_key(key)
+        if not label or label in {"신청", "추천", "대여", "공급", "지원", "대출", "합계"}:
+            continue
+        row = buckets.setdefault(label, {"dimension_label": label})
+        if metric_type == "count":
+            row["support_count"] = _clean_numeric_value(value)
+        else:
+            row["support_amount_million_krw"] = _clean_numeric_value(value)
+
+    rows: list[dict[str, object | None]] = []
+    for label, row in buckets.items():
+        row[_dimension_bucket_column(dimension_type)] = label
+        rows.append(row)
+    return rows
+
+
+def _bucket_metric_type(key: object) -> str | None:
+    text = re.sub(r"\s+", "", str(key or ""))
+    if re.search(r"(건수|업체수)(\(.*\))?$", text):
+        return "count"
+    if re.search(r"(금액|지원금액)(\(.*\)|_백만원)?$", text):
+        return "amount"
+    return None
+
+
+def _bucket_label_from_metric_key(key: object) -> str | None:
+    text = str(key or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(\(?단위_?(개|백만원)\)?|\(?백만원\)?|_백만원)", "", text)
+    text = re.sub(r"(지원)?(건수|업체수|금액)$", "", text).strip()
+    text = text.strip(" _-()")
+    return text or None
+
+
+def _dimension_bucket_column(dimension_type: str) -> str:
+    return {
+        "employee_size": "employee_size_bucket",
+        "asset_size": "asset_size_bucket",
+        "business_age": "business_age_bucket",
+        "industry": "industry_name",
+    }.get(dimension_type, "dimension_label")
+
+
+def _dimension_label(row: dict[str, Any], dimension_type: str) -> object | None:
+    return row.get(_dimension_bucket_column(dimension_type))
 
 
 def _excluded_industry_source_table(conn: sqlite3.Connection) -> str | None:
@@ -866,6 +1824,116 @@ def is_ksic_excluded(ksic_code: object) -> bool:
     )
 
 
+def find_external_notice_matches(
+    fund_name: object,
+    category: object | None = None,
+    search_keyword: object | None = None,
+    limit: int = 3,
+) -> list[dict[str, object]]:
+    ensure_api_tables()
+    if not fund_name and not category and not search_keyword:
+        return []
+
+    keywords = _notice_keywords(fund_name, category, search_keyword)
+    if not keywords:
+        return []
+
+    with connect() as conn:
+        if not _table_exists(conn, "external_notices"):
+            return []
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            select
+                notice_key, pblanc_seq, title, detail_business_name,
+                detail_url, application_url, application_start_date,
+                application_end_date, support_institution_name, business_type,
+                support_type, required_certifications,
+                required_certification_codes, support_target,
+                support_content, application_method, created_at_source,
+                updated_at_source, notice_file_url, notice_file_name
+            from external_notices
+            order by
+                coalesce(application_end_date, '') desc,
+                coalesce(updated_at_source, created_at_source, '') desc
+            limit 300
+            """
+        ).fetchall()
+
+    matches: list[dict[str, object]] = []
+    for row in rows:
+        record = dict(row)
+        score = _external_notice_match_score(record, keywords)
+        if score <= 0:
+            continue
+        record["match_score"] = score
+        matches.append(record)
+
+    return sorted(
+        matches,
+        key=lambda item: (
+            int(item.get("match_score") or 0),
+            str(item.get("application_end_date") or ""),
+            str(item.get("updated_at_source") or item.get("created_at_source") or ""),
+        ),
+        reverse=True,
+    )[: max(1, int(limit))]
+
+
+def _notice_keywords(
+    fund_name: object,
+    category: object | None,
+    search_keyword: object | None,
+) -> list[str]:
+    raw_keywords = [fund_name, category, search_keyword]
+    pieces: list[str] = []
+    for raw in raw_keywords:
+        text = str(raw or "").replace("-", " ")
+        for token in re.split(r"[\s/,()]+", text):
+            token = token.strip()
+            if len(token) >= 2:
+                pieces.append(token)
+        if str(raw or "").strip():
+            pieces.append(str(raw).strip())
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for piece in pieces:
+        normalized = _normalize_text(piece)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(piece)
+    return result
+
+
+def _external_notice_match_score(record: dict[str, object], keywords: list[str]) -> int:
+    title_text = _normalize_text(record.get("title"))
+    detail_text = _normalize_text(record.get("detail_business_name"))
+    support_type = _normalize_text(record.get("support_type"))
+    body_text = _normalize_text(
+        " ".join(
+            str(record.get(key) or "")
+            for key in ("support_target", "support_content", "application_method")
+        )
+    )
+    score = 0
+    for keyword in keywords:
+        normalized = _normalize_text(keyword)
+        if not normalized:
+            continue
+        if normalized in title_text:
+            score += 60
+        if normalized in detail_text:
+            score += 70
+        if normalized in support_type:
+            score += 20
+        if normalized in body_text:
+            score += 8
+    if "정책자금" in str(record.get("support_type") or ""):
+        score += 15
+    return score
+
+
 def _resolve_table(keyword: str) -> str | None:
     for dataset_key, table_name in CSV_DATASETS:
         if keyword in dataset_key or dataset_key in keyword:
@@ -882,6 +1950,68 @@ def read_dataset(keyword: str) -> pd.DataFrame:
         if not _table_exists(conn, table_name):
             return pd.DataFrame()
         return pd.read_sql_query(f'select * from "{table_name}"', conn)
+
+
+def read_kosmes_support_statistics(
+    dataset_key: str | None = None,
+    dimension_type: str | None = None,
+    snapshot_date: str | None = None,
+    region_name: str | None = None,
+    industry_name: str | None = None,
+    business_age_bucket: str | None = None,
+    employee_size_bucket: str | None = None,
+    asset_size_bucket: str | None = None,
+    fund_type_name: str | None = None,
+    latest_only: bool = False,
+) -> pd.DataFrame:
+    """Read normalized KOSMES support statistics for recommendation features."""
+
+    ensure_api_tables()
+    conditions = []
+    params: list[object] = []
+    filters = {
+        "dataset_key": dataset_key,
+        "dimension_type": dimension_type,
+        "snapshot_date": snapshot_date,
+        "region_name": region_name,
+        "industry_name": industry_name,
+        "business_age_bucket": business_age_bucket,
+        "employee_size_bucket": employee_size_bucket,
+        "asset_size_bucket": asset_size_bucket,
+        "fund_type_name": fund_type_name,
+    }
+    for column, value in filters.items():
+        if value is None:
+            continue
+        conditions.append(f"{column} = ?")
+        params.append(value)
+
+    where_clause = f"where {' and '.join(conditions)}" if conditions else ""
+    latest_clause = ""
+    if latest_only:
+        latest_clause = """
+            and snapshot_date = (
+                select max(snapshot_date)
+                from kosmes_support_statistics latest
+                where latest.dataset_key = kosmes_support_statistics.dataset_key
+            )
+        """
+        if where_clause:
+            latest_clause = latest_clause.replace("and ", "and ", 1)
+        else:
+            latest_clause = "where " + latest_clause.strip()[4:]
+
+    query = f"""
+        select *
+        from kosmes_support_statistics
+        {where_clause}
+        {latest_clause}
+        order by dataset_key, snapshot_date, id
+    """
+    with connect() as conn:
+        if not _table_exists(conn, "kosmes_support_statistics"):
+            return pd.DataFrame()
+        return pd.read_sql_query(query, conn, params=params)
 
 
 def database_summary() -> pd.DataFrame:

@@ -16,7 +16,6 @@ DATA_GO_KR_SERVICE_KEY
 | 이름 | 사용 인증키 | 사용 가이드 위치 |
 | --- | --- | --- |
 | 중소벤처24_공고정보 연계 API | 중소벤처24 OpenAPI | docs/api_guides/smes24-notice-linkage-api-guide-ai-context.md |
-| 중소벤처24_증명서 일괄 확인 서비스 API | 중소벤처24 OpenAPI | docs/api_guides/smes24-certificate-batch-verification-api-guide-ai-context.md |
 | 금융위원회_기업기본정보 | 공공데이터 포털 | docs/api_guides/financial-commission-corp-basic-info-openapi-guide-ai-context.md |
 | 금융위원회_기업 재무정보 | 공공데이터 포털 | docs/api_guides/financial-commission-corp-financial-info-openapi-guide-ai-context.md |
 | 금융위원회_개인사업자재무정보 | 공공데이터 포털 | docs/api_guides/small_business_finance_openapi_guide.md |

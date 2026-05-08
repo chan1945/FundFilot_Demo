@@ -4,8 +4,9 @@ app.py  ─  FundPilot 정책자금 추천 서비스
 """
 
 from datetime import date, datetime
-from urllib.parse import quote
+from html import escape as html_escape
 
+import re
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -13,14 +14,23 @@ import streamlit as st
 
 # ── 승인 가능성 예측 모듈 ──
 from data_store import (
+    connect,
+    ensure_database,
     has_excluded_industry_rules,
     is_ksic_excluded as is_db_ksic_excluded,
     read_dataset,
+    read_policy_fund_summaries,
 )
 from approval_model import predict_approval
-from api_clients import FETCH_SUCCESS, get_corp_outline_v2, get_summ_fina_stat_v2
+from api_clients import (
+    FETCH_SUCCESS,
+    get_corp_outline_v2,
+    get_sole_prop_finance_info,
+    get_summ_fina_stat_v2,
+)
 
 BASE_RATE = 3.14
+KOSMES_POLICY_APPLY_URL = "https://digital.kosmes.or.kr/dh/PLFD/APPLY/PSTEP000M0.do"
 
 # ══════════════════════════════════════════════
 # 페이지 설정
@@ -413,6 +423,7 @@ footer                            { display: none !important; }
 df_sales      = read_dataset("매출액 규모별 지원실적")
 df_industry   = read_dataset("정책자금 업종별 지원")
 df_experience = read_dataset("정책자금 업력별 지원")
+df_fund_type  = read_dataset("정책자금 자금종류별 융자 현황")
 
 # ══════════════════════════════════════════════
 # 선택 옵션
@@ -507,109 +518,199 @@ PREFERRED_CERTS_FOR_LIMIT_EXCEPTION = {
     "소재·부품·장비 강소기업 100", "스타트업 100", "아기유니콘 또는 예비유니콘",
     "초격차 스타트업 프로젝트 선정", "도약(Jump-Up) 프로그램 선정",
 }
+SOLE_PROP_INDUSTRY_QUERY = {
+    "금속": "제조업", "기계": "제조업", "전기": "제조업", "전자": "제조업",
+    "섬유": "제조업", "화공": "제조업", "식료": "제조업",
+    "정보": "정보통신업", "유통": "도매 및 소매업", "기타": "",
+}
 
 # ══════════════════════════════════════════════
-# 정책자금 DB (기존 동일)
+# 정책자금 DB
 # ══════════════════════════════════════════════
-POLICY_FUNDS = [
-    {"name": "창업기반지원자금", "category": "혁신창업사업화자금",
-     "broad_keywords": ["혁신창업사업화", "창업기반지원"],
-     "target": "업력 7년 미만 창업기업 또는 예비창업자",
-     "required": {"max_years": 7, "allow_pre_founder": True},
-     "preferred_purposes": ["창업자금", "시설자금", "운전자금"],
-     "loan_limit": "연간 60억 원 이내", "facility_limit": "시설자금 연간 60억 원 이내",
-     "working_limit": "운전자금 연간 5억 원 이내", "period": "시설 10년 / 운전 5년",
-     "interest": f"시설 {BASE_RATE-0.6:.2f}% / 운전 {BASE_RATE-0.3:.2f}%",
-     "interest_formula": "시설: 기준금리-0.6%p / 운전: 기준금리-0.3%p",
-     "extra_note": "신산업 창업 분야 등 세부 예외조건 확인 필요",
-     "search_keyword": "창업기반지원자금"},
-    {"name": "청년전용창업자금", "category": "혁신창업사업화자금",
-     "broad_keywords": ["혁신창업사업화", "청년전용창업"],
-     "target": "대표자 만 39세 이하, 업력 3년 미만",
-     "required": {"max_years": 3, "max_ceo_age": 39, "allow_pre_founder": True},
-     "preferred_purposes": ["창업자금"],
-     "loan_limit": "최대 1억 원 이내", "facility_limit": "제조업 2억 원 이내",
-     "working_limit": "최대 1억 원 이내", "period": "시설 10년 / 운전 6년",
-     "interest": "2.5% 고정금리", "interest_formula": "2.5% 고정금리",
-     "extra_note": "청년창업 평가위원회 심의 통해 결정",
-     "search_keyword": "청년전용창업자금"},
-    {"name": "개발기술사업화자금", "category": "혁신창업사업화자금",
-     "broad_keywords": ["혁신창업사업화", "개발기술사업화"],
-     "target": "특허·정부 R&D 성공기술·인증기술 보유 중소기업",
-     "required": {"tech_required": True},
-     "preferred_purposes": ["기술개발", "시설자금", "운전자금"],
-     "loan_limit": "연간 30억 원 이내", "facility_limit": "시설 30억 원 이내",
-     "working_limit": "운전 5억 원 이내", "period": "시설 10년 / 운전 5년",
-     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
-     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
-     "extra_note": "혁신성장분야는 시설 60억·운전 10억 이내 가능",
-     "search_keyword": "개발기술사업화자금"},
-    {"name": "신시장진출지원자금 - 내수기업수출기업화", "category": "신시장진출지원자금",
-     "broad_keywords": ["신시장진출", "내수기업수출기업화"],
-     "target": "내수기업 또는 수출 10만 달러 미만 수출초보기업",
-     "required": {"export_stage": ["내수기업", "수출 준비 중", "수출 10만 달러 미만"]},
-     "preferred_purposes": ["수출/글로벌", "운전자금"],
-     "loan_limit": "운전 10억 원 이내", "facility_limit": "세부 공고 확인",
-     "working_limit": "운전 10억 원 이내", "period": "운전 5년",
-     "interest": f"{BASE_RATE:.2f}%", "interest_formula": "기준금리",
-     "extra_note": "수출실적 10만 달러 미만 확인 필요",
-     "search_keyword": "내수기업수출기업화"},
-    {"name": "신시장진출지원자금 - 수출기업글로벌화", "category": "신시장진출지원자금",
-     "broad_keywords": ["신시장진출", "수출기업글로벌화"],
-     "target": "수출 10만 달러 이상 수출유망기업",
-     "required": {"export_stage": ["수출 10만 달러 이상"]},
-     "preferred_purposes": ["수출/글로벌", "시설자금", "운전자금"],
-     "loan_limit": "시설 30억 / 운전 10억 이내", "facility_limit": "시설 30억 이내",
-     "working_limit": "운전 10억 이내", "period": "시설 10년 / 운전 5년",
-     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
-     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
-     "extra_note": "수출 10만 달러 이상 여부 확인 필요",
-     "search_keyword": "수출기업글로벌화"},
-    {"name": "혁신성장지원자금", "category": "신성장기반자금",
-     "broad_keywords": ["신성장기반", "혁신성장지원"],
-     "target": "업력 7년 이상 성장유망 중소기업",
-     "required": {"min_years": 7},
-     "preferred_purposes": ["시설자금", "운전자금"],
-     "loan_limit": "연간 60억 원 이내", "facility_limit": "시설 60억 이내",
-     "working_limit": "운전 5억 이내", "period": "시설 10년 / 운전 5년",
-     "interest": f"시설 {BASE_RATE+0.2:.2f}% / 운전 {BASE_RATE+0.5:.2f}%",
-     "interest_formula": "시설: 기준금리+0.2%p / 운전: 기준금리+0.5%p",
-     "extra_note": "성장성·시설투자·중점지원분야 여부 확인 필요",
-     "search_keyword": "혁신성장지원자금"},
-    {"name": "제조현장스마트화자금", "category": "신성장기반자금",
-     "broad_keywords": ["신성장기반", "제조현장스마트화"],
-     "target": "스마트공장 도입 또는 제조현장 스마트화 추진기업",
-     "required": {"smart_factory_required": True},
-     "preferred_purposes": ["시설자금", "운전자금"],
-     "loan_limit": "시설 100억 원 이내", "facility_limit": "시설 100억 이내",
-     "working_limit": "운전 10억 이내", "period": "시설 10년 / 운전 5년",
-     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
-     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
-     "extra_note": "스마트공장 관련 요건 확인 필요",
-     "search_keyword": "제조현장스마트화자금"},
-    {"name": "긴급경영안정자금 - 일시적경영애로", "category": "긴급경영안정자금",
-     "broad_keywords": ["긴급경영안정", "일시적경영애로"],
-     "target": "매출액·영업이익 감소, 대형사고 등 일시적 경영애로 기업",
-     "required": {"management_distress_required": True},
-     "preferred_purposes": ["긴급경영", "운전자금"],
-     "loan_limit": "운전 10억 원 이내, 3년간 15억 이내",
-     "facility_limit": "해당 없음", "working_limit": "운전 10억 이내",
-     "period": "운전 5년",
-     "interest": f"{BASE_RATE+0.5:.2f}%", "interest_formula": "기준금리+0.5%p",
-     "extra_note": "매출·영업이익 10% 이상 감소 등 증빙 필요",
-     "search_keyword": "긴급경영안정자금 일시적경영애로"},
-    {"name": "재도약지원자금 - 사업전환자금", "category": "재도약지원자금",
-     "broad_keywords": ["재도약지원", "사업전환"],
-     "target": "사업전환계획 또는 사업재편계획 승인 후 5년 미만 기업",
-     "required": {"business_conversion_required": True},
-     "preferred_purposes": ["사업전환"],
-     "loan_limit": "연간 100억 원 이내", "facility_limit": "시설 100억 이내",
-     "working_limit": "운전 5억 이내", "period": "시설 10년 / 운전 6년",
-     "interest": f"시설 {BASE_RATE-0.3:.2f}% / 운전 {BASE_RATE:.2f}%",
-     "interest_formula": "시설: 기준금리-0.3%p / 운전: 기준금리",
-     "extra_note": "사업전환계획 승인 여부 확인 필요",
-     "search_keyword": "사업전환자금"},
-]
+FUND_RULES = {
+    "창업기반지원자금(일반)": {
+        "category": "혁신창업사업화자금",
+        "broad_keywords": ["혁신창업사업화", "창업기반지원"],
+        "required": {"max_years": 7, "allow_pre_founder": True},
+        "preferred_purposes": ["창업자금", "시설자금", "운전자금"],
+        "search_keyword": "창업기반지원자금",
+    },
+    "청년전용창업자금": {
+        "category": "혁신창업사업화자금",
+        "broad_keywords": ["혁신창업사업화", "청년전용창업"],
+        "required": {"max_years": 3, "max_ceo_age": 39, "allow_pre_founder": True},
+        "preferred_purposes": ["창업자금"],
+        "search_keyword": "청년전용창업자금",
+    },
+    "개발기술사업화자금": {
+        "category": "혁신창업사업화자금",
+        "broad_keywords": ["혁신창업사업화", "개발기술사업화"],
+        "required": {"tech_required": True},
+        "preferred_purposes": ["기술개발", "시설자금", "운전자금"],
+        "search_keyword": "개발기술사업화자금",
+    },
+    "혁신성장지원": {
+        "category": "신성장기반자금",
+        "broad_keywords": ["신성장기반", "혁신성장지원"],
+        "required": {"min_years": 7},
+        "preferred_purposes": ["시설자금", "운전자금"],
+        "search_keyword": "혁신성장지원",
+    },
+    "Net-Zero 유망기업 지원": {
+        "category": "신성장기반자금",
+        "broad_keywords": ["신성장기반", "Net-Zero", "탄소중립"],
+        "required": {"carbon_required": True},
+        "preferred_purposes": ["시설자금", "운전자금"],
+        "search_keyword": "Net-Zero 유망기업 지원",
+    },
+    "제조현장스마트화": {
+        "category": "신성장기반자금",
+        "broad_keywords": ["신성장기반", "제조현장스마트화"],
+        "required": {"smart_factory_required": True},
+        "preferred_purposes": ["시설자금", "운전자금"],
+        "search_keyword": "제조현장스마트화",
+    },
+    "스케일업금융": {
+        "category": "신성장기반자금",
+        "broad_keywords": ["신성장기반", "스케일업금융"],
+        "required": {},
+        "preferred_purposes": ["시설자금", "운전자금"],
+        "search_keyword": "스케일업금융",
+    },
+    "협동화": {
+        "category": "신성장기반자금",
+        "broad_keywords": ["신성장기반", "협동화"],
+        "required": {},
+        "preferred_purposes": ["시설자금", "운전자금"],
+        "search_keyword": "협동화",
+    },
+    "내수기업의 수출기업화": {
+        "category": "신시장진출지원자금",
+        "broad_keywords": ["신시장진출", "내수기업 수출기업화", "내수기업수출기업화"],
+        "required": {"export_stage": ["내수기업", "수출 준비 중", "수출 10만 달러 미만"]},
+        "preferred_purposes": ["수출/글로벌", "운전자금"],
+        "search_keyword": "내수기업 수출기업화",
+    },
+    "수출기업의 글로벌기업화": {
+        "category": "신시장진출지원자금",
+        "broad_keywords": ["신시장진출", "수출기업 글로벌화", "수출기업글로벌화"],
+        "required": {"export_stage": ["수출 10만 달러 이상"]},
+        "preferred_purposes": ["수출/글로벌", "시설자금", "운전자금"],
+        "search_keyword": "수출기업 글로벌화",
+    },
+    "재해중소기업지원": {
+        "category": "긴급경영안정자금",
+        "broad_keywords": ["긴급경영안정", "재해중소기업지원"],
+        "required": {"disaster_required": True},
+        "preferred_purposes": ["긴급경영", "운전자금"],
+        "search_keyword": "재해중소기업지원",
+    },
+    "일시적경영애로": {
+        "category": "긴급경영안정자금",
+        "broad_keywords": ["긴급경영안정", "일시적경영애로"],
+        "required": {"management_distress_required": True},
+        "preferred_purposes": ["긴급경영", "운전자금"],
+        "search_keyword": "일시적경영애로",
+    },
+    "사업전환/사업재편": {
+        "category": "재도약지원자금",
+        "broad_keywords": ["재도약지원", "사업전환", "사업재편"],
+        "required": {"business_conversion_required": True},
+        "preferred_purposes": ["사업전환"],
+        "search_keyword": "사업전환",
+    },
+    "통상변화대응": {
+        "category": "재도약지원자금",
+        "broad_keywords": ["재도약지원", "통상변화대응"],
+        "required": {"trade_damage_required": True},
+        "preferred_purposes": ["사업전환", "운전자금"],
+        "search_keyword": "통상변화대응",
+    },
+    "재창업자금": {
+        "category": "재도약지원자금",
+        "broad_keywords": ["재도약지원", "재창업"],
+        "required": {"restart_required": True},
+        "preferred_purposes": ["창업자금", "운전자금", "시설자금"],
+        "search_keyword": "재창업자금",
+    },
+    "구조개선전용자금": {
+        "category": "재도약지원자금",
+        "broad_keywords": ["재도약지원", "구조개선전용"],
+        "required": {"management_distress_required": True},
+        "preferred_purposes": ["긴급경영", "운전자금", "사업전환"],
+        "search_keyword": "구조개선전용자금",
+    },
+    "매출채권팩토링": {
+        "category": "기타 정책자금",
+        "broad_keywords": ["매출채권팩토링", "팩토링"],
+        "required": {},
+        "preferred_purposes": ["운전자금"],
+        "search_keyword": "매출채권팩토링",
+    },
+    "동반성장네트워크론": {
+        "category": "기타 정책자금",
+        "broad_keywords": ["동반성장네트워크론", "네트워크론"],
+        "required": {},
+        "preferred_purposes": ["운전자금"],
+        "search_keyword": "동반성장네트워크론",
+    },
+}
+
+
+def clean_policy_detail_source(value):
+    return re.sub(r"\s*\(\[코스메스\]\[\d+\]\)", "", str(value or "")).strip()
+
+
+def read_policy_fund_detail_summary():
+    return read_policy_fund_summaries()
+
+
+def normalize_detail_fund_name(value):
+    text = str(value or "")
+    replacements = {
+        "창업기반지원자금(일반)": "창업기반지원자금",
+        "내수기업의 수출기업화": "내수기업 수출기업화",
+        "수출기업의 글로벌기업화": "수출기업 글로벌화",
+        "제조현장스마트화": "제조현장스마트화자금",
+        "혁신성장지원": "혁신성장지원자금",
+        "사업전환/사업재편": "사업전환자금",
+    }
+    return replacements.get(text, text)
+
+
+def build_policy_funds_from_detail_doc():
+    funds = []
+    for row in read_policy_fund_detail_summary():
+        name = row.get("정책자금명", "")
+        rule = FUND_RULES.get(name, {})
+        normalized_name = normalize_detail_fund_name(name)
+        loan_limit = row.get("대출한도 요약", "")
+        period = row.get("대출기간", "")
+        fund = {
+            "name": name,
+            "detail_name": name,
+            "category": rule.get("category") or "정책자금",
+            "broad_keywords": rule.get("broad_keywords") or [name, normalized_name],
+            "target": row.get("지원대상 요약", ""),
+            "required": rule.get("required", {}),
+            "preferred_purposes": rule.get("preferred_purposes", ["운전자금"]),
+            "loan_limit": loan_limit,
+            "facility_limit": loan_limit if "시설" in period or "시설" in loan_limit else "해당 없음",
+            "working_limit": loan_limit if "운전" in period or "운전" in loan_limit else "해당 없음",
+            "period": period,
+            "interest": row.get("금리", ""),
+            "interest_formula": row.get("금리", ""),
+            "extra_note": row.get("주요 조건 / 비고", ""),
+            "loan_method": row.get("융자방식", ""),
+            "source": row.get("출처 URL") or clean_policy_detail_source(row.get("출처")),
+            "detail_source": row.get("출처 URL") or clean_policy_detail_source(row.get("출처")),
+            "search_keyword": rule.get("search_keyword") or name,
+        }
+        funds.append(fund)
+    return funds
+
+
+POLICY_FUNDS = build_policy_funds_from_detail_doc()
 
 # ══════════════════════════════════════════════
 # 공통 함수
@@ -683,6 +784,60 @@ def corp_candidate_table(records):
             "업종명": record.get("sicNm") or record.get("enpMainBizNm"),
         })
     return pd.DataFrame(rows)
+
+def infer_industry_label_from_api_text(*values):
+    text = " ".join(str(value or "") for value in values)
+    keyword_map = [
+        ("금속", "금속"), ("기계", "기계"), ("전기", "전기"), ("전자", "전자"),
+        ("섬유", "섬유"), ("화학", "화공"), ("화공", "화공"), ("식료", "식료"),
+        ("식품", "식료"), ("소프트웨어", "정보"), ("정보", "정보"), ("통신", "정보"),
+        ("전자상거래", "유통"), ("도매", "유통"), ("소매", "유통"), ("유통", "유통"),
+    ]
+    for keyword, label in keyword_map:
+        if keyword in text and label in INDUSTRY_OPTIONS:
+            return label
+    if "제조" in text:
+        return "기계"
+    return None
+
+def sole_prop_benchmark_table(records):
+    rows = []
+    for record in records[:10]:
+        rows.append({
+            "기준년월": record.get("basYm"),
+            "재무기준연도": record.get("fnafBasYr"),
+            "지역": record.get("bizAreaNm"),
+            "업종": record.get("bizBzcCdNm"),
+            "종업원": record.get("empeCntNm"),
+            "매출": parse_api_int(record.get("saleAmt")),
+            "영업이익": parse_api_int(record.get("bzopPftAmt")),
+            "자산": parse_api_int(record.get("astTsumAmt")),
+            "부채": parse_api_int(record.get("debtTsumAmt")),
+        })
+    return pd.DataFrame(rows)
+
+def summarize_sole_prop_benchmark(records, annual_sales=None):
+    if not records:
+        return None
+    sales_values = [parse_api_int(record.get("saleAmt")) for record in records]
+    sales_values = [value for value in sales_values if value is not None and value > 0]
+    debt_values = [parse_api_int(record.get("debtTsumAmt")) for record in records]
+    debt_values = [value for value in debt_values if value is not None and value >= 0]
+    asset_values = [parse_api_int(record.get("astTsumAmt")) for record in records]
+    asset_values = [value for value in asset_values if value is not None and value > 0]
+    avg_sales = int(sum(sales_values) / len(sales_values)) if sales_values else None
+    avg_debt = int(sum(debt_values) / len(debt_values)) if debt_values else None
+    avg_assets = int(sum(asset_values) / len(asset_values)) if asset_values else None
+    warning = ""
+    if avg_sales and annual_sales is not None and annual_sales < avg_sales * 0.5:
+        warning = "개인사업자 유사군 평균 매출 대비 낮아 매출 증빙 보완이 필요할 수 있습니다."
+    return {
+        "row_count": len(records),
+        "avg_sales": avg_sales,
+        "avg_debt": avg_debt,
+        "avg_assets": avg_assets,
+        "warning": warning,
+    }
 
 def preferred_financial_record(records):
     if not records:
@@ -845,13 +1000,6 @@ def adjust_approval_probability(prob, user):
         return min(round(prob + uplift, 1), 97.0)
     return min(prob, min(caps))
 
-def make_search_url(keyword):
-    encoded = quote(str(keyword))
-    return (
-        "https://www.smes.go.kr/main/sportsBsnsPolicy"
-        f"?srchGubun=3&srchText={encoded}&progress=ok&newView=new&cntPerPage=20"
-    )
-
 def safe_get_score(df, keywords, column):
     if df.empty or "구분" not in df.columns or column not in df.columns:
         return 50.0
@@ -867,6 +1015,368 @@ def safe_get_score(df, keywords, column):
     if mx == mn:
         return 50.0
     return max(0.0, min(float((value - mn) / (mx - mn) * 100), 100.0))
+
+def normalize_text(value):
+    return "".join(str(value or "").upper().split())
+
+def read_optional_table(table_names):
+    ensure_database()
+    with connect() as conn:
+        for table_name in table_names:
+            exists = conn.execute(
+                "select 1 from sqlite_master where type = 'table' and name = ?",
+                (table_name,),
+            ).fetchone()
+            if not exists:
+                continue
+            count = conn.execute(f'select count(*) from "{table_name}"').fetchone()
+            if count and int(count[0]) > 0:
+                return pd.read_sql_query(f'select * from "{table_name}"', conn), table_name
+    return pd.DataFrame(), None
+
+def find_column(df, candidates):
+    normalized = {normalize_text(column): column for column in df.columns}
+    for candidate in candidates:
+        column = normalized.get(normalize_text(candidate))
+        if column:
+            return column
+    return None
+
+def numeric_series(series):
+    cleaned = (
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0)
+
+def numeric_sum(df, column):
+    if df.empty or column not in df.columns:
+        return 0.0
+    return float(numeric_series(df[column]).sum())
+
+def normalize_fund_label(value):
+    text = normalize_text(value)
+    for token in ("자금", "-", "·", "_", "(", ")", "/", " "):
+        text = text.replace(token, "")
+    return text
+
+def format_count(value):
+    try:
+        return f"{int(float(str(value).replace(',', ''))):,}"
+    except (TypeError, ValueError):
+        return "-"
+
+def policy_fund_reference(fund):
+    """Match a recommendation candidate to actual KOSMES fund-type statistics."""
+
+    df = df_fund_type
+    if df.empty or "구분" not in df.columns:
+        return None
+
+    specific_candidates = []
+    for value in (fund.get("name"), fund.get("search_keyword")):
+        text = str(value or "")
+        if "-" in text:
+            specific_candidates.append(text.split("-")[-1].strip())
+        if " " in text:
+            specific_candidates.extend(part.strip() for part in text.split() if len(part.strip()) >= 2)
+
+    raw_candidates = [
+        *specific_candidates,
+        fund.get("search_keyword"),
+        fund.get("name"),
+        *fund.get("broad_keywords", []),
+        fund.get("category"),
+    ]
+    candidates = [candidate for candidate in raw_candidates if candidate]
+    best = None
+    for row_index, row in df.iterrows():
+        label = str(row.get("구분") or "").strip()
+        normalized_label = normalize_fund_label(label)
+        if not normalized_label:
+            continue
+        for priority, candidate in enumerate(candidates):
+            normalized_candidate = normalize_fund_label(candidate)
+            if not normalized_candidate:
+                continue
+            score = 0
+            if normalized_label == normalized_candidate:
+                score = 100
+            elif normalized_label in normalized_candidate:
+                score = 85
+            elif normalized_candidate in normalized_label:
+                score = 75
+            if score <= 0:
+                continue
+            rank = (-priority, score, -row_index)
+            if best is None or rank > best["rank"]:
+                best = {"rank": rank, "row": row, "matched_keyword": candidate}
+
+    if not best:
+        return None
+
+    row = best["row"]
+    name = str(row.get("구분") or "").strip()
+    application_count = row.get("신청건수")
+    approval_count = row.get("지원결정건수")
+    loan_count = row.get("대출건수")
+    evidence = (
+        f"자금종류별 융자 현황 기준 실제 자금명 '{name}' "
+        f"(신청 {format_count(application_count)}건, "
+        f"지원결정 {format_count(approval_count)}건, "
+        f"대출 {format_count(loan_count)}건)"
+    )
+    return {
+        "name": name,
+        "matched_keyword": best["matched_keyword"],
+        "application_count": application_count,
+        "approval_count": approval_count,
+        "loan_count": loan_count,
+        "evidence": evidence,
+    }
+
+def employee_bucket_columns(employee_count):
+    count = int(employee_count or 0)
+    if count < 5:
+        return ("employee_lt_5_amount", "employee_lt_5_amount_million_krw", "5인미만 금액")
+    if count < 10:
+        return ("employee_lt_10_amount", "employee_lt_10_amount_million_krw", "10인미만 금액")
+    if count < 20:
+        return ("employee_lt_20_amount", "employee_lt_20_amount_million_krw", "20인미만 금액")
+    if count < 50:
+        return ("employee_lt_50_amount", "employee_lt_50_amount_million_krw", "50인미만 금액")
+    if count < 100:
+        return ("employee_lt_100_amount", "employee_lt_100_amount_million_krw", "100인미만 금액")
+    if count < 300:
+        return ("employee_lt_300_amount", "employee_lt_300_amount_million_krw", "300인미만 금액")
+    return ("employee_gte_300_amount", "employee_gte_300_amount_million_krw", "300인이상 금액")
+
+def asset_bucket_columns(asset_total):
+    amount = float(asset_total or 0)
+    if amount < 500_000_000:
+        return ("asset_lt_500m_amount_million_krw", "5억미만 금액(백만원)")
+    if amount < 1_000_000_000:
+        return ("asset_lt_1b_amount_million_krw", "10억미만 금액(백만원)")
+    if amount < 3_000_000_000:
+        return ("asset_lt_3b_amount_million_krw", "30억미만 금액(백만원)")
+    if amount < 5_000_000_000:
+        return ("asset_lt_5b_amount_million_krw", "50억미만 금액(백만원)")
+    if amount < 7_000_000_000:
+        return ("asset_lt_7b_amount_million_krw", "70억미만 금액(백만원)")
+    if amount < 10_000_000_000:
+        return ("asset_lt_10b_amount_million_krw", "100억미만 금액(백만원)")
+    if amount < 20_000_000_000:
+        return ("asset_lt_20b_amount_million_krw", "200억미만 금액(백만원)")
+    if amount < 30_000_000_000:
+        return ("asset_lt_30b_amount_million_krw", "300억미만 금액(백만원)")
+    return ("asset_gte_30b_amount_million_krw", "300억이상 금액(백만원)")
+
+def score_bucket_pattern(df, source, keywords, amount_columns, label_columns):
+    amount_col = find_column(df, amount_columns)
+    if df.empty or not amount_col:
+        return None
+
+    target = df
+    label_col = find_column(df, label_columns)
+    if label_col and keywords:
+        matched = pd.Series(False, index=df.index)
+        for keyword in keywords:
+            matched = matched | df[label_col].astype(str).str.contains(keyword, na=False)
+        if matched.any():
+            target = df.loc[matched]
+
+    values = numeric_series(df[amount_col])
+    mn, mx = float(values.min()), float(values.max())
+    if mx == mn:
+        score = 50.0
+    else:
+        score = max(0.0, min((numeric_sum(target, amount_col) - mn) / (mx - mn) * 100, 100.0))
+    return {"score": round(score, 1), "source": source, "column": amount_col}
+
+def score_fund_type_conversion(fund):
+    df, source = read_optional_table((
+        "kosmes_policy_fund_loan_by_fund_type_status",
+        "support_stats_fund_type",
+    ))
+    label_col = find_column(df, ("fund_type_name", "구분"))
+    app_col = find_column(df, ("application_count", "신청건수"))
+    approval_col = find_column(df, ("approval_decision_count", "지원결정건수"))
+    loan_col = find_column(df, ("loan_count", "대출건수"))
+    if df.empty or not label_col or not app_col or not (approval_col or loan_col):
+        return None
+
+    keywords = fund["broad_keywords"] + [fund["category"], fund["name"]]
+    matched = pd.Series(False, index=df.index)
+    for keyword in keywords:
+        matched = matched | df[label_col].astype(str).str.contains(keyword, na=False)
+    target = df.loc[matched] if matched.any() else df
+
+    applications = max(numeric_sum(target, app_col), 1.0)
+    ratios = []
+    if approval_col:
+        ratios.append(numeric_sum(target, approval_col) / applications)
+    if loan_col:
+        ratios.append(numeric_sum(target, loan_col) / applications)
+    if not ratios:
+        return None
+    score = max(0.0, min(sum(ratios) / len(ratios) * 100, 100.0))
+    return {"score": round(score, 1), "source": source, "column": "지원결정/대출 전환율"}
+
+def score_region_pattern(region):
+    df, source = read_optional_table((
+        "kosmes_regional_support_performance",
+        "kosmes_regional_sme_support_status",
+        "support_stats_region",
+    ))
+    region_col = find_column(df, ("region_name", "지역", "지역명", "﻿지역", "癤우﻿지역"))
+    requested_col = find_column(df, ("requested_total_amount_million_krw", "신청금액(합계_백만원)"))
+    recommended_col = find_column(df, ("recommended_total_amount_million_krw", "추천금액(합계_백만원)"))
+    loaned_col = find_column(df, ("loaned_total_amount_million_krw", "loan_total_amount_million_krw", "대여금액(합계_백만원)"))
+    if df.empty or not region_col:
+        return None
+
+    matched = df[df[region_col].astype(str).str.contains(region, na=False)]
+    if matched.empty:
+        return None
+
+    ratios = []
+    if requested_col and recommended_col:
+        ratios.append(numeric_sum(matched, recommended_col) / max(numeric_sum(matched, requested_col), 1.0))
+    if recommended_col and loaned_col:
+        ratios.append(numeric_sum(matched, loaned_col) / max(numeric_sum(matched, recommended_col), 1.0))
+    if not ratios and loaned_col:
+        total_share = numeric_sum(matched, loaned_col) / max(numeric_sum(df, loaned_col), 1.0)
+        ratios.append(total_share * len(df))
+    if not ratios:
+        return None
+
+    score = max(0.0, min(sum(ratios) / len(ratios) * 100, 100.0))
+    return {"score": round(score, 1), "source": source, "column": "지역 신청-추천-대여 패턴"}
+
+def table_has_rows(table_names):
+    df, _ = read_optional_table(table_names)
+    return not df.empty
+
+def special_api_bonus(fund, user):
+    bonus = 0.0
+    evidence = []
+    special_rules = [
+        (
+            user["ceo_age"] <= 39 and "청년전용" in fund["name"],
+            ("kosmes_youth_startup_fund_industry_support", "kosmes_youth_startup_fund_region_support"),
+            4.0,
+            "청년전용창업자금 API 패턴과 대표자 연령 조건이 연결됩니다.",
+        ),
+        (
+            user["has_smart_factory"] and "스마트화" in fund["name"],
+            ("kosmes_smart_manufacturing_fund_support", "kosmes_interest_subsidy_smart_manufacturing_support"),
+            5.0,
+            "스마트공장 API 패턴이 제조현장스마트화 추천을 보강합니다.",
+        ),
+        (
+            user["has_carbon"] and ("Net-Zero" in fund["name"] or "혁신" in fund["name"] or "신성장" in fund["category"]),
+            ("kosmes_interest_subsidy_net_zero_support",),
+            3.0,
+            "Net-Zero API 패턴이 탄소중립 중점분야를 보강합니다.",
+        ),
+        (
+            user["is_focus_field"] and "혁신성장" in fund["name"],
+            ("kosmes_interest_subsidy_innovation_growth_support",),
+            4.0,
+            "혁신성장 이차보전 API 패턴이 혁신성장지원자금 추천을 보강합니다.",
+        ),
+        (
+            user["export_stage"] != "내수기업"
+            and any(token in fund["name"] for token in ("신시장", "수출", "글로벌")),
+            ("kosmes_domestic_to_export_fund_industry_support", "kosmes_export_globalization_fund_business_age_support"),
+            4.0,
+            "수출자금 API 패턴이 신시장진출 추천을 보강합니다.",
+        ),
+        (
+            (
+                "소재·부품·장비" in " ".join(user["focus_fields"])
+                or "소재·부품·장비 강소기업 100" in user["certifications"]
+            ) and ("혁신" in fund["name"] or "신성장" in fund["category"]),
+            ("kosmes_materials_parts_equipment_support",),
+            3.0,
+            "소부장 API 패턴이 전략산업 우대를 보강합니다.",
+        ),
+        (
+            user["has_business_conversion"]
+            and any(token in fund["name"] for token in ("재도약", "사업전환", "사업재편")),
+            ("kosmes_technology_innovation_restartup_support",),
+            3.0,
+            "재창업·재도약 API 패턴이 사업전환 추천을 보강합니다.",
+        ),
+    ]
+    for condition, tables, score, message in special_rules:
+        if condition and table_has_rows(tables):
+            bonus += score
+            evidence.append(message)
+    return bonus, evidence
+
+def api_pattern_context(fund, user):
+    keywords = fund["broad_keywords"] + [fund["category"], fund["name"]]
+    components = []
+    risks = []
+    evidence = []
+
+    employee_df, employee_source = read_optional_table((
+        "kosmes_policy_fund_employee_size_support_status_long",
+        "kosmes_policy_fund_employee_size_support_status",
+    ))
+    employee_score = score_bucket_pattern(
+        employee_df,
+        employee_source,
+        keywords,
+        employee_bucket_columns(user["employee_count"]),
+        ("fund_program_name", "구분"),
+    )
+    if employee_score:
+        components.append(("종업원규모", employee_score, 0.05))
+
+    asset_df, asset_source = read_optional_table((
+        "kosmes_policy_fund_asset_size_support_status_long",
+        "kosmes_policy_fund_asset_size_support_status",
+    ))
+    asset_score = score_bucket_pattern(
+        asset_df,
+        asset_source,
+        keywords,
+        asset_bucket_columns(user["asset_total"]),
+        ("fund_program_name", "구분"),
+    )
+    if asset_score:
+        components.append(("자산규모", asset_score, 0.05))
+
+    fund_type_score = score_fund_type_conversion(fund)
+    if fund_type_score:
+        components.append(("자금종류 전환율", fund_type_score, 0.07))
+
+    region_score = score_region_pattern(user["region"])
+    if region_score:
+        components.append(("지역 실행률", region_score, 0.04))
+
+    adjustment = 0.0
+    for label, item, weight in components:
+        score = item["score"]
+        adjustment += (score - 50.0) * weight
+        if score >= 65:
+            evidence.append(f"{label} 수혜 패턴 양호({score}점, {item['source']})")
+        elif score <= 35:
+            risks.append(f"{label} 수혜 패턴 이탈 가능({score}점, {item['source']})")
+
+    bonus, special_evidence = special_api_bonus(fund, user)
+    adjustment += bonus
+    evidence.extend(special_evidence)
+
+    return {
+        "adjustment": round(max(-10.0, min(adjustment, 14.0)), 1),
+        "evidence": evidence,
+        "risks": risks,
+    }
 
 def get_historical_score(fund, industry_col, sales_col, experience_col):
     keywords = fund["broad_keywords"] + [fund["category"], fund["name"]]
@@ -908,6 +1418,8 @@ def check_required(fund, user):
         warn.append("이자보상배율 1.0 미만으로 한계기업 여부 확인이 필요합니다.")
     if user["is_small_merchant_limited"]:
         warn.append("상시근로자 수 기준 소상공인 제한 가능성이 있습니다.")
+    if user.get("sole_prop_benchmark_warning"):
+        warn.append(user["sole_prop_benchmark_warning"])
     if user["recent_support_count"] >= 3 and not user["has_performance_exception"]:
         warn.append("최근 5년 중진공 정책자금 3회 이상 수혜로 추가 지원 제한 가능성이 있습니다.")
     if user["working_capital_over_25"]:
@@ -948,11 +1460,23 @@ def check_required(fund, user):
     if req.get("smart_factory_required") and not user["has_smart_factory"]:
         fail.append("스마트공장 추진 요건 필요")
 
+    if req.get("carbon_required") and not user["has_carbon"]:
+        fail.append("Net-Zero·탄소중립 관련 중점분야 또는 전환 증빙 필요")
+
     if req.get("business_conversion_required") and not user["has_business_conversion"]:
         fail.append("사업전환계획 승인 요건 필요")
 
+    if req.get("restart_required") and not user["has_restart"]:
+        fail.append("재창업 기업 또는 재창업 예정자 요건 필요")
+
+    if req.get("trade_damage_required") and not user["has_trade_damage"]:
+        fail.append("FTA 등 통상변화 피해 또는 영향 증빙 필요")
+
     if req.get("management_distress_required") and not user["has_management_distress"]:
         fail.append("경영애로 증빙 필요")
+
+    if req.get("disaster_required") and not user["has_disaster"]:
+        fail.append("재해중소기업 확인 등 재해 피해 증빙 필요")
 
     if "export_stage" in req:
         if user["export_stage"] not in req["export_stage"]:
@@ -979,7 +1503,10 @@ def purpose_match_score(fund, user):
         score += 12
     if user["has_tech"] and "기술" in fund["name"]:
         score += 10
-    if user["export_stage"] != "내수기업" and "신시장" in fund["name"]:
+    if user["export_stage"] != "내수기업" and (
+        fund["category"] == "신시장진출지원자금"
+        or any(token in fund["name"] for token in ("수출", "글로벌"))
+    ):
         score += 10
     if user["is_manufacturing"] and "청년전용" in fund["name"]:
         score += 5
@@ -991,13 +1518,29 @@ def purpose_match_score(fund, user):
         score += 6
     if user["sales_growth_rate"] is not None and user["sales_growth_rate"] >= 20:
         score += 5
-    if user["export_amount_usd"] >= 500_000 and "신시장" in fund["name"]:
+    if user["export_amount_usd"] >= 500_000 and (
+        fund["category"] == "신시장진출지원자금"
+        or any(token in fund["name"] for token in ("수출", "글로벌"))
+    ):
         score += 6
     if user["ip_count"] >= 1 and ("기술" in fund["name"] or "혁신" in fund["name"]):
         score += 5
     if user["smart_factory_stage"] != "미도입" and "스마트화" in fund["name"]:
         score += 12
-    if user["restart_conversion_status"] != "해당 없음" and "재도약" in fund["name"]:
+    if user["has_carbon"] and ("Net-Zero" in fund["name"] or "탄소" in " ".join(fund["broad_keywords"])):
+        score += 12
+    if user["has_disaster"] and "재해" in fund["name"]:
+        score += 14
+    if user["has_management_distress"] and ("일시적경영애로" in fund["name"] or "구조개선" in fund["name"]):
+        score += 10
+    if user["has_trade_damage"] and "통상변화" in fund["name"]:
+        score += 12
+    if user["has_restart"] and "재창업" in fund["name"]:
+        score += 12
+    if user["restart_conversion_status"] != "해당 없음" and (
+        fund["category"] == "재도약지원자금"
+        or any(token in fund["name"] for token in ("사업전환", "사업재편", "재창업"))
+    ):
         score += 12
     if user["desired_amount"] > 0 and user["desired_amount"] <= 500_000_000:
         score += 2
@@ -1009,16 +1552,24 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
         fail, warn, matched = check_required(fund, user_info)
         hist = get_historical_score(fund, industry_col, sales_col, experience_col)
         fit  = purpose_match_score(fund, user_info)
+        api_context = api_pattern_context(fund, user_info)
+        fund_reference = policy_fund_reference(fund)
+        matched_count = len(matched)
+        warn.extend(api_context["risks"])
+        matched.extend(api_context["evidence"])
+        if not fund_reference:
+            warn.append("자금종류별 융자 현황에서 동일 자금명을 확인하지 못했습니다.")
 
         if len(fail) == 0:
             status = "우선 추천"
-            final_score = min(hist * 0.7 + fit + len(matched) * 3, 100)
+            final_score = min(hist * 0.7 + fit + matched_count * 3, 100)
         elif len(fail) <= 2 and fit > 0:
             status = "조건부 검토"
             final_score = min(hist * 0.45 + fit, 70)
         else:
             status = "조건 불충족"
             final_score = min(hist * 0.25, 40)
+        final_score = max(0.0, min(final_score + api_context["adjustment"], 100.0))
 
         rows.append({
             "정책자금": fund["name"], "분류": fund["category"],
@@ -1034,15 +1585,23 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
             "공식금리": fund["interest"],
             "금리산식": fund["interest_formula"],
             "대출기간": fund["period"],
+            "융자방식": fund.get("loan_method", ""),
             "확인사항": fund["extra_note"],
+            "세부조건출처": fund.get("detail_source", ""),
             "검색키워드": fund["search_keyword"],
+            "공식자금명": fund_reference["name"] if fund_reference else fund["name"],
+            "자금종류근거": fund_reference["evidence"] if fund_reference else "",
+            "API보정": api_context["adjustment"],
+            "API근거": " / ".join(api_context["evidence"]),
+            "패턴리스크": " / ".join(api_context["risks"]),
         })
 
     result = pd.DataFrame(rows)
-    rec  = result[result["추천상태"] == "우선 추천"].sort_values("추천점수", ascending=False)
-    cond = result[result["추천상태"] == "조건부 검토"].sort_values("추천점수", ascending=False)
-    rej  = result[result["추천상태"] == "조건 불충족"].sort_values("추천점수", ascending=False)
-    return pd.concat([rec, cond, rej], ignore_index=True).head(top_n)
+    return (
+        result.sort_values("추천점수", ascending=False, kind="mergesort")
+        .head(top_n)
+        .reset_index(drop=True)
+    )
 
 def make_status_badge(status):
     if status == "우선 추천":
@@ -1060,6 +1619,10 @@ def approval_color(prob):
     else:
         return "#DC2626"
 
+def display_text(value, fallback=""):
+    text = str(value if value not in (None, "") else fallback)
+    return html_escape(text)
+
 # ══════════════════════════════════════════════
 # 세션 상태
 # ══════════════════════════════════════════════
@@ -1068,6 +1631,8 @@ for key, default in [
     ("user_info", None), ("approval_prob", None),
     ("corp_lookup_candidates", []), ("corp_lookup_message", ""),
     ("corp_lookup_applied_info", ""), ("corp_lookup_finance_message", ""),
+    ("corp_lookup_industry_suggestion", None),
+    ("sole_prop_benchmark_rows", []), ("sole_prop_benchmark_message", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1075,6 +1640,8 @@ for key, default in [
 for key, default in [
     ("company_name_input", "예시테크 주식회사"),
     ("business_number_input", "123-45-67890"),
+    ("industry_label_input", "정보"),
+    ("ksic_code_input", normalize_ksic(KSIC_SAMPLE_OPTIONS[1])),
     ("startup_date_input", date(2019, 3, 15)),
     ("employee_count_input", 35),
     ("annual_sales_input", 2_800_000_000),
@@ -1086,6 +1653,7 @@ for key, default in [
     ("debt_ratio_input", 180.5),
     ("operating_profit_input", 250_000_000),
     ("listing_status_input", LISTING_OPTIONS[0]),
+    ("certifications_input", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1218,6 +1786,13 @@ if step == 1:
                 info_parts.append(f"주요사업: {selected.get('enpMainBizNm')}")
             if selected.get("corpRegMrktDcdNm"):
                 info_parts.append(f"등록시장: {selected.get('corpRegMrktDcdNm')}")
+            industry_suggestion = infer_industry_label_from_api_text(
+                selected.get("sicNm"),
+                selected.get("enpMainBizNm"),
+            )
+            if industry_suggestion:
+                st.session_state.corp_lookup_industry_suggestion = industry_suggestion
+                info_parts.append(f"API 업종 추천: {industry_suggestion}")
             st.session_state.corp_lookup_applied_info = " · ".join(info_parts)
 
             crno = "".join(ch for ch in str(selected.get("crno") or "") if ch.isdigit())
@@ -1242,6 +1817,19 @@ if step == 1:
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
     st.markdown('<p class="section-title">기업 기본 정보</p>', unsafe_allow_html=True)
 
+    if st.session_state.corp_lookup_industry_suggestion:
+        sug_col1, sug_col2 = st.columns([3, 1])
+        with sug_col1:
+            st.info(
+                f"기업기본정보 API 업종명 기준 추천 업종은 "
+                f"{st.session_state.corp_lookup_industry_suggestion}입니다. "
+                "KSIC/업종은 사용자가 확인한 뒤 적용하세요."
+            )
+        with sug_col2:
+            if st.button("추천 업종 적용", use_container_width=True):
+                st.session_state.industry_label_input = st.session_state.corp_lookup_industry_suggestion
+                st.rerun()
+
     id_col1, id_col2 = st.columns([2, 1])
     with id_col1:
         company_name = st.text_input("기업명", key="company_name_input")
@@ -1250,9 +1838,12 @@ if step == 1:
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        industry_label  = st.selectbox("업종", list(INDUSTRY_OPTIONS.keys()))
+        industry_label  = st.selectbox("업종", list(INDUSTRY_OPTIONS.keys()), key="industry_label_input")
         ksic_sample     = st.selectbox("KSIC 코드 예시", KSIC_SAMPLE_OPTIONS)
-        ksic_code       = st.text_input("KSIC 코드", value=normalize_ksic(ksic_sample), max_chars=8)
+        if st.session_state.get("ksic_sample_last") != ksic_sample:
+            st.session_state.ksic_code_input = normalize_ksic(ksic_sample)
+            st.session_state.ksic_sample_last = ksic_sample
+        ksic_code       = st.text_input("KSIC 코드", max_chars=8, key="ksic_code_input")
         company_type    = st.selectbox("기업 형태", COMPANY_TYPE_OPTIONS)
         ceo_age         = st.number_input("대표자 나이 (만 나이)", min_value=18, max_value=80, value=39)
     with col2:
@@ -1300,6 +1891,45 @@ if step == 1:
     growth_text = "계산 불가" if sales_growth_rate is None else f"{sales_growth_rate}%"
     st.caption(f"파생 매출 규모: {sales_label} · 최근 3개년 연평균 매출 성장률: {growth_text}")
 
+    if company_type == "개인사업자":
+        bench_col1, bench_col2 = st.columns([3, 1])
+        with bench_col1:
+            query_industry = SOLE_PROP_INDUSTRY_QUERY.get(industry_label, "")
+            st.caption(
+                f"개인사업자 유사군 조회 조건: 지역 {region}, "
+                f"업종 {query_industry or industry_label}"
+            )
+        with bench_col2:
+            benchmark_clicked = st.button("유사군 벤치마크 조회", use_container_width=True)
+        if benchmark_clicked:
+            with st.spinner("개인사업자 유사군 재무 벤치마크를 조회 중입니다..."):
+                benchmark_result = get_sole_prop_finance_info(
+                    biz_area_name=region,
+                    biz_bzc_cd_name=query_industry or industry_label,
+                    num_of_rows=10,
+                )
+            if benchmark_result.status == FETCH_SUCCESS and benchmark_result.data:
+                st.session_state.sole_prop_benchmark_rows = benchmark_result.data
+                summary = summarize_sole_prop_benchmark(benchmark_result.data, annual_sales)
+                avg_sales_text = f"{summary['avg_sales']:,}원" if summary and summary.get("avg_sales") else "계산 불가"
+                st.session_state.sole_prop_benchmark_message = (
+                    f"유사군 {len(benchmark_result.data)}건을 확인했습니다. 평균 매출: {avg_sales_text}"
+                )
+            else:
+                st.session_state.sole_prop_benchmark_rows = []
+                st.session_state.sole_prop_benchmark_message = (
+                    "조회 가능한 개인사업자 유사군 재무정보가 없습니다. 수동 입력값을 유지합니다."
+                )
+
+    if st.session_state.sole_prop_benchmark_message:
+        st.info(st.session_state.sole_prop_benchmark_message)
+    if st.session_state.sole_prop_benchmark_rows:
+        st.dataframe(
+            sole_prop_benchmark_table(st.session_state.sole_prop_benchmark_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
     st.markdown('<p class="section-title">신용·세금 및 수혜 이력</p>', unsafe_allow_html=True)
 
@@ -1327,7 +1957,7 @@ if step == 1:
         focus_fields = st.multiselect("혁신성장·중점지원 분야", FOCUS_FIELD_OPTIONS)
         new_hires = st.number_input("최근 1년 신규 고용 창출 인원", min_value=0, max_value=5000, value=0, step=1)
         export_amount_usd = st.number_input("최근 12개월 수출실적(USD)", min_value=0, value=0, step=10_000)
-        certifications = st.multiselect("보유 인증 현황", CERTIFICATION_OPTIONS)
+        certifications = st.multiselect("보유 인증 현황", CERTIFICATION_OPTIONS, key="certifications_input")
     with p2:
         ip_count = st.number_input("최근 3년 내 지식재산권 보유 건수", min_value=0, max_value=1000, value=0, step=1)
         smart_factory_stage = st.selectbox("스마트공장 도입 단계", SMART_FACTORY_OPTIONS)
@@ -1424,6 +2054,10 @@ if step == 1:
             or (debt_ratio_over_limit and not financial_limit_exception)
             or current_total_limit_over_60
         )
+        sole_prop_benchmark_summary = summarize_sole_prop_benchmark(
+            st.session_state.get("sole_prop_benchmark_rows", []),
+            annual_sales,
+        )
         hard_block_count = sum([
             has_tax_arrears,
             operation_status != "운영 중",
@@ -1445,6 +2079,7 @@ if step == 1:
             "company_name": company_name.strip(),
             "business_number": business_number_digits,
             "ksic_code": ksic_code, "startup_date": startup_date.isoformat(),
+            "region": region,
             "employee_count": employee_count, "operation_status": operation_status,
             "annual_sales": annual_sales, "capital_total": capital_total,
             "asset_total": asset_total, "debt_ratio": debt_ratio,
@@ -1495,7 +2130,28 @@ if step == 1:
             "has_financial_limit_risk": has_financial_limit_risk,
             "hard_block_count": hard_block_count,
             "current_total_limit_over_60": current_total_limit_over_60,
+            "sole_prop_benchmark": sole_prop_benchmark_summary,
+            "sole_prop_benchmark_warning": (
+                sole_prop_benchmark_summary.get("warning")
+                if sole_prop_benchmark_summary else ""
+            ),
         }
+        special_tags = []
+        if ceo_age <= 39:
+            special_tags.append("청년")
+        if has_smart_factory:
+            special_tags.append("스마트공장")
+        if user_info["has_carbon"]:
+            special_tags.append("Net-Zero")
+        if is_focus_field:
+            special_tags.append("혁신성장")
+        if export_stage != "내수기업":
+            special_tags.append("수출")
+        if (
+            "소재·부품·장비" in " ".join(focus_fields)
+            or "소재·부품·장비 강소기업 100" in certifications
+        ):
+            special_tags.append("소부장")
 
         result = recommend_fund(industry_col, sales_col, experience_col, user_info)
 
@@ -1513,6 +2169,10 @@ if step == 1:
                 ceo_age=ceo_age,
                 has_tax_arrears=has_tax_arrears,
                 has_credit_issue=has_credit_issue,
+                employee_count=employee_count,
+                asset_total=asset_total,
+                region_label=region,
+                special_tags=special_tags,
             )
             approval_prob = adjust_approval_probability(approval_prob, user_info)
 
@@ -1614,13 +2274,14 @@ elif step == 2:
         # 공식 조건 테이블
         st.markdown(f"""
         <table class="info-table">
-          <tr><th>지원 대상</th><td>{top["지원대상"]}</td></tr>
-          <tr><th>공식 한도</th><td>{top["공식한도"]}</td></tr>
-          <tr><th>시설자금 한도</th><td>{top["시설한도"]}</td></tr>
-          <tr><th>운전자금 한도</th><td>{top["운전한도"]}</td></tr>
-          <tr><th>공식 금리</th><td>{top["공식금리"]} ({top["금리산식"]})</td></tr>
-          <tr><th>대출 기간</th><td>{top["대출기간"]}</td></tr>
-          <tr><th>확인 사항</th><td>{top["확인사항"]}</td></tr>
+          <tr><th>지원 대상</th><td>{display_text(top["지원대상"])}</td></tr>
+          <tr><th>융자 방식</th><td>{display_text(top["융자방식"])}</td></tr>
+          <tr><th>대출한도</th><td>{display_text(top["공식한도"])}</td></tr>
+          <tr><th>대출 기간</th><td>{display_text(top["대출기간"])}</td></tr>
+          <tr><th>금리</th><td>{display_text(top["공식금리"])}</td></tr>
+          <tr><th>API 보정</th><td>{display_text(f'{top["API보정"]:+.1f}점 · {top["API근거"] or "저장된 보조 API 패턴 없음"}')}</td></tr>
+          <tr><th>세부조건 출처</th><td>{display_text(top["세부조건출처"])}</td></tr>
+          <tr><th>확인 사항</th><td>{display_text(top["확인사항"])}</td></tr>
         </table>
         """, unsafe_allow_html=True)
 
@@ -1660,6 +2321,16 @@ elif step == 2:
         )
         st.plotly_chart(fig, use_container_width=False)
         st.caption("※ 공공데이터 학습 기반 AI 예측값으로 참고용입니다.")
+
+    benchmark = user_info.get("sole_prop_benchmark")
+    if benchmark:
+        st.markdown('<p class="section-title">자동 보강 확인</p>', unsafe_allow_html=True)
+        if benchmark:
+            avg_sales = benchmark.get("avg_sales")
+            avg_sales_text = f"{avg_sales:,}원" if avg_sales else "계산 불가"
+            st.info(f"개인사업자 유사군 {benchmark['row_count']}건 기준 평균 매출: {avg_sales_text}")
+            if benchmark.get("warning"):
+                st.warning(benchmark["warning"])
 
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
@@ -1712,23 +2383,27 @@ elif step == 3:
         <div class="{card_cls}">
           <span class="{badge_cls}">{i+1}위</span>
           {make_status_badge(row["추천상태"])}
-          <div class="fund-name">{row["정책자금"]}</div>
+          <div class="fund-name">{display_text(row["정책자금"])}</div>
           <div class="fund-info-row">
             <div class="fund-info-item">
               <div class="fund-info-label">추천 점수</div>
-              <div class="fund-info-value">{row["추천점수"]}점</div>
+              <div class="fund-info-value">{display_text(row["추천점수"])}점</div>
             </div>
             <div class="fund-info-item">
-              <div class="fund-info-label">공식 금리</div>
-              <div class="fund-info-value">{row["공식금리"]}</div>
+              <div class="fund-info-label">요약 금리</div>
+              <div class="fund-info-value">{display_text(row["공식금리"])}</div>
             </div>
             <div class="fund-info-item">
-              <div class="fund-info-label">최대 한도</div>
-              <div class="fund-info-value">{row["공식한도"]}</div>
+              <div class="fund-info-label">대출한도</div>
+              <div class="fund-info-value">{display_text(row["공식한도"])}</div>
             </div>
             <div class="fund-info-item">
               <div class="fund-info-label">대출 기간</div>
-              <div class="fund-info-value">{row["대출기간"]}</div>
+              <div class="fund-info-value">{display_text(row["대출기간"])}</div>
+            </div>
+            <div class="fund-info-item">
+              <div class="fund-info-label">API 보정</div>
+              <div class="fund-info-value">{display_text(f'{row["API보정"]:+.1f}')}점</div>
             </div>
           </div>
         </div>
@@ -1737,13 +2412,13 @@ elif step == 3:
         with st.expander(f"▸ {row['정책자금']} 상세 조건 보기"):
             st.markdown(f"""
             <table class="info-table">
-              <tr><th>지원 대상</th><td>{row["지원대상"]}</td></tr>
-              <tr><th>공식 한도</th><td>{row["공식한도"]}</td></tr>
-              <tr><th>시설 한도</th><td>{row["시설한도"]}</td></tr>
-              <tr><th>운전 한도</th><td>{row["운전한도"]}</td></tr>
-              <tr><th>금리 산식</th><td>{row["금리산식"]}</td></tr>
-              <tr><th>대출 기간</th><td>{row["대출기간"]}</td></tr>
-              <tr><th>확인 사항</th><td>{row["확인사항"]}</td></tr>
+              <tr><th>지원 대상</th><td>{display_text(row["지원대상"])}</td></tr>
+              <tr><th>융자 방식</th><td>{display_text(row["융자방식"])}</td></tr>
+              <tr><th>대출한도</th><td>{display_text(row["공식한도"])}</td></tr>
+              <tr><th>대출 기간</th><td>{display_text(row["대출기간"])}</td></tr>
+              <tr><th>금리</th><td>{display_text(row["공식금리"])}</td></tr>
+              <tr><th>세부조건 출처</th><td>{display_text(row["세부조건출처"])}</td></tr>
+              <tr><th>확인 사항</th><td>{display_text(row["확인사항"])}</td></tr>
             </table>
             """, unsafe_allow_html=True)
             if row["제외사유"]:
@@ -1752,8 +2427,6 @@ elif step == 3:
             if row["주의사항"]:
                 st.markdown(f'<div class="warn-box">⚠ {row["주의사항"]}</div>',
                             unsafe_allow_html=True)
-            if row["충족조건"]:
-                st.success(row["충족조건"])
 
     st.markdown('<hr class="gov-divider">', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
@@ -1761,46 +2434,54 @@ elif step == 3:
         if st.button("◀  분석 결과로", use_container_width=True):
             st.session_state.step = 2; st.rerun()
     with c2:
-        if st.button("최신 공고 확인  ▶", use_container_width=True, type="primary"):
+        if st.button("온라인 신청 연결  ▶", use_container_width=True, type="primary"):
             st.session_state.step = 4; st.rerun()
 
 # ══════════════════════════════════════════════
-# STEP 4. 공고 신청
+# STEP 4. 온라인 신청
 # ══════════════════════════════════════════════
 elif step == 4:
     result = st.session_state.result
-    st.markdown('<p class="section-title">최신 공고 및 신청 연결</p>', unsafe_allow_html=True)
-    st.caption("추천된 세부 정책자금의 최신 공고를 확인하고 신청 페이지로 이동할 수 있습니다.")
+    st.markdown('<p class="section-title">중진공 정책자금 온라인 신청</p>', unsafe_allow_html=True)
+    st.caption("추천 결과를 참고해 중진공 정책자금 온라인 신청 화면으로 이동할 수 있습니다.")
 
     for i, row in result.iterrows():
         st.markdown(f"""
         <div class="fund-card-{'1' if i==0 else '2'}">
           <span class="rank-badge-{'1' if i==0 else '2'}">{i+1}위 추천 자금</span>
-          <div class="fund-name">{row["정책자금"]}</div>
+          <div class="fund-name">{display_text(row["정책자금"])}</div>
           <div class="fund-info-row">
             <div class="fund-info-item">
-              <div class="fund-info-label">공식 한도</div>
-              <div class="fund-info-value">{row["공식한도"]}</div>
+              <div class="fund-info-label">자금종류별 융자 현황 기준명</div>
+              <div class="fund-info-value">{display_text(row["공식자금명"])}</div>
             </div>
             <div class="fund-info-item">
-              <div class="fund-info-label">공식 금리</div>
-              <div class="fund-info-value">{row["공식금리"]}</div>
+              <div class="fund-info-label">대출한도</div>
+              <div class="fund-info-value">{display_text(row["공식한도"])}</div>
+            </div>
+            <div class="fund-info-item">
+              <div class="fund-info-label">요약 금리</div>
+              <div class="fund-info-value">{display_text(row["공식금리"])}</div>
+            </div>
+            <div class="fund-info-item">
+              <div class="fund-info-label">자금종류 데이터</div>
+              <div class="fund-info-value">{display_text(row["자금종류근거"], "매칭 없음")}</div>
             </div>
           </div>
         </div>
         """, unsafe_allow_html=True)
-
-        url = make_search_url(row["검색키워드"])
         st.link_button(
-            f"  {row['검색키워드']} 공고 확인하기 (중소벤처24)",
-            url, use_container_width=True
+            "중진공 정책자금 온라인 신청으로 이동",
+            KOSMES_POLICY_APPLY_URL,
+            key=f"kosmes_policy_apply_{i}_{row['검색키워드']}",
+            use_container_width=True,
         )
         st.markdown("")
 
     st.markdown(f"""
     <div class="warn-box">
-      ※ API가 정상 응답 시 신청기간·접수상태·상세 URL이 자동 표시됩니다.
-      한도·금리는 점수 추정이 아닌 세부 정책자금 공식 DB 기준입니다.
+      ※ 신청 가능 기간, 접수 상태, 제출 서류는 중진공 정책자금 온라인 신청 화면에서 최종 확인해야 합니다.
+      한도·금리는 docs/policy_fund/policy_fund_detail.md의 요약 내용 기준입니다.
     </div>
     """, unsafe_allow_html=True)
 
@@ -1811,8 +2492,16 @@ elif step == 4:
             st.session_state.step = 3; st.rerun()
     with c2:
         if st.button("처음부터 다시", use_container_width=True, type="primary"):
-            for key in ["step","result","labels","user_info","approval_prob"]:
+            for key in [
+                "step", "result", "labels", "user_info", "approval_prob",
+                "corp_lookup_candidates", "corp_lookup_message",
+                "corp_lookup_applied_info", "corp_lookup_finance_message",
+                "corp_lookup_industry_suggestion", "sole_prop_benchmark_rows",
+                "sole_prop_benchmark_message",
+            ]:
                 st.session_state[key] = None
+            st.session_state.corp_lookup_candidates = []
+            st.session_state.sole_prop_benchmark_rows = []
             st.session_state.step = 1
             st.rerun()
 
@@ -1822,7 +2511,7 @@ elif step == 4:
 st.markdown("""
 <div class="gov-footer">
   FundPilot · 중소벤처기업진흥공단 공공데이터 활용 서비스 ·
-  데이터 출처: data.go.kr / smes.go.kr<br>
+  데이터 출처: data.go.kr / kosmes.or.kr<br>
   본 서비스의 분석 결과는 참고용이며, 실제 신청 자격은 중진공 공식 공고를 확인하세요.
 </div>
 """, unsafe_allow_html=True)

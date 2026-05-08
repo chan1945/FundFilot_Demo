@@ -31,7 +31,7 @@ streamlit run app.py
 
 | 이름 | 설명 |
 | --- | --- |
-| `SMES24_OPENAPI_TOKEN` | 중소벤처24 공고/증명서 API 인증 토큰 |
+| `SMES24_OPENAPI_TOKEN` | 중소벤처24 공고정보 API 인증 토큰 |
 | `DATA_GO_KR_SERVICE_KEY` | 금융위원회, 중소벤처기업진흥공단, ODcloud API용 공공데이터포털 인증키 |
 
 ## 데이터 파일
