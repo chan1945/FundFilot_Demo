@@ -103,15 +103,19 @@ def _markdown_reference_urls(lines: list[str]) -> dict[str, str]:
     for line in lines:
         match = re.match(r"\[(\d+)\]:\s+(\S+)", line.strip())
         if match:
-            refs[match.group(1)] = match.group(2)
+            refs[match.group(1)] = _strip_url_tracking_params(match.group(2))
     return refs
+
+
+def _strip_url_tracking_params(value: str) -> str:
+    return str(value or "").split("?", 1)[0].split("#", 1)[0].strip()
 
 
 def _resolve_policy_source_url(value: str, refs: dict[str, str]) -> str:
     match = re.search(r"\[코스메스\]\[(\d+)\]", str(value or ""))
     if not match:
         return ""
-    return refs.get(match.group(1), "")
+    return _strip_url_tracking_params(refs.get(match.group(1), ""))
 
 
 def read_policy_fund_summaries(path: Path | None = None) -> list[dict[str, str]]:

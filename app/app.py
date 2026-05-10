@@ -713,7 +713,8 @@ FUND_RULES = {
 
 
 def clean_policy_detail_source(value):
-    return re.sub(r"\s*\(\[코스메스\]\[\d+\]\)", "", str(value or "")).strip()
+    cleaned = re.sub(r"\s*\(\[코스메스\]\[\d+\]\)", "", str(value or "")).strip()
+    return cleaned.split("?", 1)[0].split("#", 1)[0].strip()
 
 
 def read_policy_fund_detail_summary():
@@ -1684,15 +1685,11 @@ def purpose_match_score(fund, user):
         score += 2
     return score
 
-def signed_score(value):
-    return f"{value:+.1f}점"
-
 def build_recommendation_reason(
     historical_score,
     purpose_score,
     matched_count,
     base_score,
-    api_adjustment,
     final_score,
 ):
     summary = (
@@ -1705,7 +1702,6 @@ def build_recommendation_reason(
         f"- 목적/정책 적합 {purpose_score:.1f}점\n"
         f"- 자격·우대 충족 {matched_count}건\n"
         f"- 기본 추천점수 {base_score:.1f}점\n"
-        f"- API 보정 {signed_score(api_adjustment)}\n"
         f"- 총합 = {final_score:.1f}점"
     )
     return summary, detail
@@ -1718,11 +1714,7 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
         fit  = purpose_match_score(fund, user_info)
         api_context = api_pattern_context(fund, user_info)
         fund_reference = policy_fund_reference(fund)
-        api_evidence = list(api_context["evidence"])
-        api_risks = list(api_context["risks"])
         matched_count = len(matched)
-        warn.extend(api_risks)
-        matched.extend(api_evidence)
         if not fund_reference:
             warn.append("자금종류별 융자 현황에서 동일 자금명을 확인하지 못했습니다.")
 
@@ -1745,7 +1737,6 @@ def recommend_fund(industry_col, sales_col, experience_col, user_info, top_n=3):
             fit,
             matched_count,
             base_score,
-            api_context["adjustment"],
             rounded_final_score,
         )
 
@@ -2475,7 +2466,6 @@ elif step == 2:
           <tr><th>대출한도</th><td>{display_text(top["공식한도"])}</td></tr>
           <tr><th>대출 기간</th><td>{display_text(top["대출기간"])}</td></tr>
           <tr><th>금리</th><td>{display_text(top["공식금리"])}</td></tr>
-          <tr><th>API 보정</th><td>{display_text(f'{top["API보정"]:+.1f}점 · {top["API근거"] or "저장된 보조 API 패턴 없음"}')}</td></tr>
           <tr><th>세부조건 출처</th><td>{display_text(top["세부조건출처"])}</td></tr>
           <tr><th>확인 사항</th><td>{display_text(top["확인사항"])}</td></tr>
         </table>
@@ -2596,10 +2586,6 @@ elif step == 3:
               <div class="fund-info-label">대출 기간</div>
               <div class="fund-info-value">{display_text(row["대출기간"])}</div>
             </div>
-            <div class="fund-info-item">
-              <div class="fund-info-label">API 보정</div>
-              <div class="fund-info-value">{display_text(f'{row["API보정"]:+.1f}')}점</div>
-            </div>
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -2618,7 +2604,6 @@ elif step == 3:
               <tr><th>목적/정책 적합</th><td>{display_text(f'{purpose_score:.1f}점')}</td></tr>
               <tr><th>자격·우대 충족</th><td>{display_text(f'{matched_count}건')}</td></tr>
               <tr><th>기본 추천점수</th><td>{display_text(f'{base_score:.1f}점')}</td></tr>
-              <tr><th>API 보정</th><td>{display_text(f'{row["API보정"]:+.1f}점 · {row["API근거"] or "저장된 보조 API 패턴 없음"}')}</td></tr>
               <tr><th>총합</th><td>{display_text(f'{float(row["추천점수"]):.1f}점')}</td></tr>
               <tr><th>충족 조건</th><td>{display_text(series_get(row, "충족조건"), "없음")}</td></tr>
             </table>

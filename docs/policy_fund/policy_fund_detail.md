@@ -57,13 +57,13 @@
 | 매출채권팩토링          | 세부 자금 | 외상매출채권 조기 현금화 필요 기업        | 매출채권 양도 방식             | 판매기업 10억원, 구매기업 30억원 | 단기 유동성        | 별도 공고 기준    | 구매기업 동의, 플랫폼 가입 필요   | 매출채권팩토링 페이지 ([코스메스][9])     |
 | 동반성장네트워크론        | 세부 자금 | 협약 발주기업 추천 수주기업            | 발주서 기반 단기자금            | 수주기업 연 15억원, 잔액 20억원 | 365일 이내       | 별도 공고 기준    | 발주금액 80% 이내          | 동반성장 네트워크론 페이지 ([코스메스][10]) |
 
-[1]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI004M0.do?utm_source=chatgpt.com "혁신창업사업화자금"
-[2]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI007M0.do?utm_source=chatgpt.com "신성장기반자금"
-[3]: https://www.kosmes.or.kr/sbc/SH/SBI/SHSBI006M0.do?utm_source=chatgpt.com "신시장진출지원자금"
-[4]: https://www.kosmes.or.kr/sbc/SH/SBI/SHSBI012M0.do?utm_source=chatgpt.com "중소벤처기업진흥공단 누리집"
-[5]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI010M0.do?utm_source=chatgpt.com "중소벤처기업진흥공단 누리집"
-[6]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI011M0.do?utm_source=chatgpt.com "통상변화대응지원사업"
-[7]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI008M0.do?utm_source=chatgpt.com "재창업자금"
+[1]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI004M0.do "혁신창업사업화자금"
+[2]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI007M0.do "신성장기반자금"
+[3]: https://www.kosmes.or.kr/sbc/SH/SBI/SHSBI006M0.do "신시장진출지원자금"
+[4]: https://www.kosmes.or.kr/sbc/SH/SBI/SHSBI012M0.do "중소벤처기업진흥공단 누리집"
+[5]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI010M0.do "중소벤처기업진흥공단 누리집"
+[6]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI011M0.do "통상변화대응지원사업"
+[7]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI008M0.do "재창업자금"
 [8]: https://www.kosmes.or.kr/nsh/SH/SBI/SHSBI009M0.do "중소벤처기업진흥공단 누리집"
 [9]: https://www.kosmes.or.kr/nsh/SH/ARF/SHARF001M0.do "중소벤처기업진흥공단 누리집"
 [10]: https://www.kosmes.or.kr/nsh/SH/ARF/SHARF201M0.do "중소벤처기업진흥공단 누리집"
